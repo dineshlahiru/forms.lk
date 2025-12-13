@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+/* Design System: forms.lk Color Palette */
+@theme {
+  --color-primary: #1A365D;
+  --color-primary-light: #3182CE;
+  --color-secondary: #4A5568;
+  --color-background: #F7FAFC;
+  --color-surface: #FFFFFF;
+  --color-success: #38A169;
+  --color-warning: #D69E2E;
+  --color-error: #E53E3E;
+  --color-text-primary: #1A202C;
+  --color-text-secondary: #718096;
+
+  /* Font sizes */
+  --font-size-h1: 2rem;
+  --font-size-h2: 1.5rem;
+  --font-size-h3: 1.25rem;
+  --font-size-body: 1rem;
+  --font-size-small: 0.875rem;
+  --font-size-caption: 0.75rem;
+}
+
+/* Base styles */
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
