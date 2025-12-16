@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'react-router-dom';
 import { FileText, Menu, X, User, LayoutDashboard } from 'lucide-react';
 import { useState } from 'react';
+import { UploadBadge } from './UploadBadge';
 
 export function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -63,6 +64,7 @@ export function Header() {
 
           {/* Actions */}
           <div className="hidden md:flex items-center gap-3">
+            <UploadBadge />
             <Link
               to="/dashboard"
               className="text-sm font-medium text-[#4A5568] hover:text-[#1A365D] transition-colors"

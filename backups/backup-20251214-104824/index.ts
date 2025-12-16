@@ -53,13 +53,10 @@ export interface FormPage {
 
 export interface Form {
   id: string;
-  section?: string;    // Government section number
-  formNumber?: string; // Government form number
   title: string;
   titleSi?: string;  // Sinhala title (සිංහල)
   titleTa?: string;  // Tamil title (தமிழ்)
   institution: string;
-  institutionId?: string; // Reference to saved institution
   category: string;
   description: string;
   pages: FormPage[];

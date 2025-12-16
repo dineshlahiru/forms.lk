@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // System collection - read-only for all, write for admins
+    match /system/{docId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Categories - read for all, write for admins
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Institutions - read for all, write for admins
+    match /institutions/{institutionId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Forms - read for all published, write for admins
+    match /forms/{formId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Users - read own profile, write own profile
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Drafts - read/write own drafts only
+    match /drafts/{draftId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Submissions - read own, write own
+    match /submissions/{submissionId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+  }
+}

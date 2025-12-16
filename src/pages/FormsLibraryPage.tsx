@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import {
   Search,
@@ -13,66 +13,38 @@ import {
   ChevronLeft,
   ChevronRight,
   Mail,
+  Settings,
+  Loader2,
 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
-import { sampleForms } from '../data/sampleForms';
-import { CATEGORIES, VERIFICATION_LEVELS } from '../types';
-import type { Form } from '../types';
-import { getCustomForms, getPhoneNumbers, formMatchesSearch, getFormTitle, detectSearchLanguage, type StoredForm } from '../utils/formsStorage';
-import type { Language } from '../types';
+import { useAllForms, useCategories, useInstitutions } from '../hooks';
+import {
+  searchForms,
+  detectSearchLanguage,
+  getFormLocalizedTitle,
+  getCategoryLocalizedName,
+  getInstitutionLocalizedName,
+  updateForm as updateFormService,
+} from '../services';
+import { useAuth } from '../context/AuthContext';
+import type { FirebaseForm, FirebaseCategory, FirebaseInstitution, Language } from '../types/firebase';
+
+// Title editing state type
+interface TitleEditState {
+  formId: string;
+  language: Language;
+  value: string;
+}
 
 const ITEMS_PER_PAGE_OPTIONS = [25, 50, 100];
 
-// Storage key for sample form title overrides
-const TITLE_OVERRIDES_KEY = 'forms-lk-title-overrides';
-
-// Get all title overrides
-function getTitleOverrides(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(TITLE_OVERRIDES_KEY) || '{}');
-  } catch {
-    return {};
-  }
-}
-
-// Convert StoredForm to Form type
-function convertStoredToForm(stored: StoredForm): Form {
-  // Convert pdfPages (base64 strings) to FormPage objects
-  const pages = (stored.pdfPages || []).map((_, index) => ({
-    id: `page-${index + 1}`,
-    elements: [] as import('../types').FormElement[],
-  }));
-
-  // Get phone numbers using helper (handles legacy format)
-  const phoneNumbers = getPhoneNumbers(stored.contactInfo);
-
-  return {
-    id: stored.id,
-    title: stored.title,
-    titleSi: stored.titleSi,
-    titleTa: stored.titleTa,
-    institution: stored.institution,
-    category: stored.category,
-    description: stored.description || '',
-    pages: pages,
-    downloads: stored.downloads || 0,
-    rating: stored.rating || 0,
-    ratingCount: stored.ratingCount || 0,
-    verificationLevel: (stored.verificationLevel || 0) as 0 | 1 | 2 | 3,
-    status: stored.status || 'published',
-    createdAt: stored.createdAt || new Date().toISOString(),
-    updatedAt: stored.updatedAt || new Date().toISOString(),
-    createdBy: 'admin',
-    postAddress: stored.contactInfo?.address,
-    officeHours: stored.contactInfo?.officeHours,
-    telephoneNumbers: phoneNumbers.length > 0 ? phoneNumbers : undefined,
-    faxNumber: stored.contactInfo?.faxNumber,
-    email: stored.contactInfo?.email,
-    website: stored.contactInfo?.website,
-    officialLocation: stored.contactInfo?.officialLocation,
-    thumbnail: stored.pdfPages?.[0],
-  };
-}
+// Verification level display
+const VERIFICATION_LEVELS = [
+  { label: 'Unverified', color: 'gray' },
+  { label: 'Official', color: 'blue' },
+  { label: 'Verified', color: 'green' },
+  { label: 'Certified', color: 'gold' },
+];
 
 export function FormsLibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -82,23 +54,66 @@ export function FormsLibraryPage() {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(50);
-  const [customForms, setCustomForms] = useState<Form[]>([]);
 
-  // Load custom forms from localStorage
-  useEffect(() => {
-    const stored = getCustomForms();
-    setCustomForms(stored.map(convertStoredToForm));
-  }, []);
+  // Admin mode state
+  const [isAdminMode, setIsAdminMode] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState<Language>('en');
+  const [editingTitle, setEditingTitle] = useState<TitleEditState | null>(null);
 
-  // Combine sample forms with custom forms, applying any title overrides
-  const allForms = useMemo(() => {
-    const titleOverrides = getTitleOverrides();
-    const sampleFormsWithOverrides = sampleForms.map(form => {
-      const override = titleOverrides[form.id];
-      return override ? { ...form, title: override } : form;
+  // Firebase hooks
+  const { data: forms, loading: formsLoading, error: formsError, refetch: refetchForms } = useAllForms();
+  const { data: categories, loading: categoriesLoading } = useCategories();
+  const { data: institutions } = useInstitutions();
+  const { isAdmin } = useAuth();
+
+  // Create lookup maps for categories and institutions
+  const categoryMap = useMemo(() => {
+    if (!categories) return new Map<string, FirebaseCategory>();
+    return new Map(categories.map(cat => [cat.id, cat]));
+  }, [categories]);
+
+  const institutionMap = useMemo(() => {
+    if (!institutions) return new Map<string, FirebaseInstitution>();
+    return new Map(institutions.map(inst => [inst.id, inst]));
+  }, [institutions]);
+
+  // Handle saving title for a specific language
+  const handleSaveTitle = useCallback(async (formId: string, language: Language, newTitle: string) => {
+    if (!newTitle.trim()) return;
+
+    try {
+      const updates: Record<string, string> = {};
+      if (language === 'en') {
+        updates.title = newTitle.trim();
+      } else if (language === 'si') {
+        updates.titleSi = newTitle.trim();
+      } else if (language === 'ta') {
+        updates.titleTa = newTitle.trim();
+      }
+      await updateFormService(formId, updates);
+      await refetchForms();
+    } catch (error) {
+      console.error('Failed to save title:', error);
+    }
+    setEditingTitle(null);
+  }, [refetchForms]);
+
+  // Start editing a title
+  const handleStartEdit = useCallback((form: FirebaseForm, language: Language) => {
+    let currentTitle = '';
+    if (language === 'en') {
+      currentTitle = form.title;
+    } else if (language === 'si') {
+      currentTitle = form.titleSi || '';
+    } else if (language === 'ta') {
+      currentTitle = form.titleTa || '';
+    }
+    setEditingTitle({
+      formId: form.id,
+      language,
+      value: currentTitle,
     });
-    return [...customForms, ...sampleFormsWithOverrides];
-  }, [customForms]);
+  }, []);
 
   // Initialize from URL params
   useEffect(() => {
@@ -127,24 +142,37 @@ export function FormsLibraryPage() {
   }, [searchQuery]);
 
   const filteredForms = useMemo(() => {
-    return allForms
-      .filter((form) => {
-        // Use multi-language search that checks title, titleSi, titleTa
-        const matchesSearch = !searchQuery || formMatchesSearch(form, searchQuery);
-        const matchesCategory = selectedCategory === 'All' || form.category === selectedCategory;
-        return matchesSearch && matchesCategory;
-      })
-      .sort((a, b) => {
-        if (sortBy === 'popular') return b.downloads - a.downloads;
-        if (sortBy === 'name') {
-          // Sort by title in the search language
-          const titleA = getFormTitle(a, searchLanguage);
-          const titleB = getFormTitle(b, searchLanguage);
-          return titleA.localeCompare(titleB);
-        }
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      });
-  }, [allForms, searchQuery, selectedCategory, sortBy, searchLanguage]);
+    if (!forms) return [];
+
+    // Apply search filter
+    let filtered = searchQuery ? searchForms(forms, searchQuery, searchLanguage) : forms;
+
+    // Apply category filter
+    if (selectedCategory !== 'All') {
+      // Find category by name to get ID
+      const category = categories?.find(c =>
+        c.name === selectedCategory ||
+        c.nameSi === selectedCategory ||
+        c.nameTa === selectedCategory ||
+        c.id === selectedCategory
+      );
+      if (category) {
+        filtered = filtered.filter(form => form.categoryId === category.id);
+      }
+    }
+
+    // Apply sorting
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'popular') return b.downloadCount - a.downloadCount;
+      if (sortBy === 'name') {
+        const titleA = getFormLocalizedTitle(a, searchLanguage);
+        const titleB = getFormLocalizedTitle(b, searchLanguage);
+        return titleA.localeCompare(titleB);
+      }
+      // newest
+      return b.updatedAt.toMillis() - a.updatedAt.toMillis();
+    });
+  }, [forms, searchQuery, selectedCategory, sortBy, searchLanguage, categories]);
 
   // Pagination
   const totalPages = Math.ceil(filteredForms.length / itemsPerPage);
@@ -163,6 +191,31 @@ export function FormsLibraryPage() {
     updateUrl('view', mode);
   };
 
+  // Loading state
+  if (formsLoading || categoriesLoading) {
+    return (
+      <Layout>
+        <div className="min-h-screen flex items-center justify-center">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+        </div>
+      </Layout>
+    );
+  }
+
+  // Error state
+  if (formsError) {
+    return (
+      <Layout>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <div className="text-center py-12 bg-white rounded-lg border border-red-200">
+            <h3 className="text-lg font-medium text-red-600 mb-1">Failed to load forms</h3>
+            <p className="text-sm text-gray-600">{formsError.message}</p>
+          </div>
+        </div>
+      </Layout>
+    );
+  }
+
   return (
     <Layout>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -170,12 +223,7 @@ export function FormsLibraryPage() {
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-[#1A202C] mb-1">Forms Library</h1>
           <p className="text-sm text-[#718096]">
-            Browse {allForms.length.toLocaleString()} government forms from various institutions
-            {customForms.length > 0 && (
-              <span className="ml-2 px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">
-                +{customForms.length} custom
-              </span>
-            )}
+            Browse {(forms?.length || 0).toLocaleString()} government forms from various institutions
           </p>
         </div>
 
@@ -209,8 +257,10 @@ export function FormsLibraryPage() {
                   className="appearance-none pl-3 pr-8 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#3182CE] min-w-[160px]"
                 >
                   <option value="All">All Categories</option>
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>{cat}</option>
+                  {categories?.map((cat) => (
+                    <option key={cat.id} value={cat.id}>
+                      {getCategoryLocalizedName(cat, searchLanguage)}
+                    </option>
                   ))}
                 </select>
                 <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
@@ -247,6 +297,22 @@ export function FormsLibraryPage() {
                   <Grid3X3 className="w-4 h-4" />
                 </button>
               </div>
+
+              {/* Admin Mode Toggle - only show for admins */}
+              {isAdmin && (
+                <button
+                  onClick={() => setIsAdminMode(!isAdminMode)}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-lg transition-colors ${
+                    isAdminMode
+                      ? 'bg-amber-100 border-amber-300 text-amber-800'
+                      : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
+                  title="Toggle Admin Mode"
+                >
+                  <Settings className="w-4 h-4" />
+                  <span className="hidden sm:inline">Admin</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -255,7 +321,11 @@ export function FormsLibraryPage() {
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 mb-3 text-sm">
           <div className="text-[#718096]">
             Showing {((currentPage - 1) * itemsPerPage) + 1}-{Math.min(currentPage * itemsPerPage, filteredForms.length)} of {filteredForms.length.toLocaleString()} forms
-            {selectedCategory !== 'All' && <span className="text-[#3182CE]"> in {selectedCategory}</span>}
+            {selectedCategory !== 'All' && (
+              <span className="text-[#3182CE]">
+                {' '}in {categoryMap.get(selectedCategory)?.name || selectedCategory}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[#718096]">Show:</span>
@@ -275,9 +345,33 @@ export function FormsLibraryPage() {
         {filteredForms.length > 0 ? (
           <>
             {viewMode === 'list' ? (
-              <ListView forms={paginatedForms} displayLanguage={searchLanguage} />
+              <ListView
+                forms={paginatedForms}
+                displayLanguage={searchLanguage}
+                isAdminMode={isAdminMode}
+                selectedLanguage={selectedLanguage}
+                onSelectLanguage={setSelectedLanguage}
+                editingTitle={editingTitle}
+                onStartEdit={handleStartEdit}
+                onSaveTitle={handleSaveTitle}
+                onEditingChange={setEditingTitle}
+                categoryMap={categoryMap}
+                institutionMap={institutionMap}
+              />
             ) : (
-              <GridView forms={paginatedForms} displayLanguage={searchLanguage} />
+              <GridView
+                forms={paginatedForms}
+                displayLanguage={searchLanguage}
+                isAdminMode={isAdminMode}
+                selectedLanguage={selectedLanguage}
+                onSelectLanguage={setSelectedLanguage}
+                editingTitle={editingTitle}
+                onStartEdit={handleStartEdit}
+                onSaveTitle={handleSaveTitle}
+                onEditingChange={setEditingTitle}
+                categoryMap={categoryMap}
+                institutionMap={institutionMap}
+              />
             )}
 
             {/* Pagination */}
@@ -341,8 +435,35 @@ export function FormsLibraryPage() {
   );
 }
 
+// List view props interface
+interface ListViewProps {
+  forms: FirebaseForm[];
+  displayLanguage: Language;
+  isAdminMode: boolean;
+  selectedLanguage: Language;
+  onSelectLanguage: (lang: Language) => void;
+  editingTitle: TitleEditState | null;
+  onStartEdit: (form: FirebaseForm, language: Language) => void;
+  onSaveTitle: (formId: string, language: Language, newTitle: string) => void;
+  onEditingChange: (state: TitleEditState | null) => void;
+  categoryMap: Map<string, FirebaseCategory>;
+  institutionMap: Map<string, FirebaseInstitution>;
+}
+
 // Compact List View - optimized for scanning many entries
-function ListView({ forms, displayLanguage }: { forms: Form[]; displayLanguage: Language }) {
+function ListView({
+  forms,
+  displayLanguage,
+  isAdminMode,
+  selectedLanguage,
+  onSelectLanguage,
+  editingTitle,
+  onStartEdit,
+  onSaveTitle,
+  onEditingChange,
+  categoryMap,
+  institutionMap,
+}: ListViewProps) {
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
       {/* Table Header */}
@@ -356,36 +477,170 @@ function ListView({ forms, displayLanguage }: { forms: Form[]; displayLanguage: 
       {/* Table Body */}
       <div className="divide-y divide-gray-100">
         {forms.map((form) => (
-          <ListViewRow key={form.id} form={form} displayLanguage={displayLanguage} />
+          <ListViewRow
+            key={form.id}
+            form={form}
+            displayLanguage={displayLanguage}
+            isAdminMode={isAdminMode}
+            selectedLanguage={selectedLanguage}
+            onSelectLanguage={onSelectLanguage}
+            editingTitle={editingTitle}
+            onStartEdit={onStartEdit}
+            onSaveTitle={onSaveTitle}
+            onEditingChange={onEditingChange}
+            categoryMap={categoryMap}
+            institutionMap={institutionMap}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function ListViewRow({ form, displayLanguage }: { form: Form; displayLanguage: Language }) {
+interface ListViewRowProps {
+  form: FirebaseForm;
+  displayLanguage: Language;
+  isAdminMode: boolean;
+  selectedLanguage: Language;
+  onSelectLanguage: (lang: Language) => void;
+  editingTitle: TitleEditState | null;
+  onStartEdit: (form: FirebaseForm, language: Language) => void;
+  onSaveTitle: (formId: string, language: Language, newTitle: string) => void;
+  onEditingChange: (state: TitleEditState | null) => void;
+  categoryMap: Map<string, FirebaseCategory>;
+  institutionMap: Map<string, FirebaseInstitution>;
+}
+
+function ListViewRow({
+  form,
+  displayLanguage,
+  isAdminMode,
+  selectedLanguage,
+  onSelectLanguage,
+  editingTitle,
+  onStartEdit,
+  onSaveTitle,
+  onEditingChange,
+  categoryMap,
+  institutionMap,
+}: ListViewRowProps) {
   const verification = VERIFICATION_LEVELS[form.verificationLevel];
-  const phones = form.telephoneNumbers?.slice(0, 2) || [];
-  const address = form.postAddress;
-  const website = form.website;
-  const email = form.email;
+  const phones = form.contactInfo?.telephoneNumbers?.slice(0, 2) || [];
+  const address = form.contactInfo?.address;
+  const website = form.contactInfo?.website;
+  const email = form.contactInfo?.email;
+
+  const isEditing = editingTitle?.formId === form.id;
+  const canEdit = isAdminMode;
+
+  const category = categoryMap.get(form.categoryId);
+  const institution = institutionMap.get(form.institutionId);
+
+  // Get title for the selected language in admin mode
+  const getTitleForLanguage = (lang: Language) => {
+    if (lang === 'en') return form.title;
+    if (lang === 'si') return form.titleSi || '';
+    if (lang === 'ta') return form.titleTa || '';
+    return form.title;
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && editingTitle) {
+      onSaveTitle(editingTitle.formId, editingTitle.language, editingTitle.value);
+    } else if (e.key === 'Escape') {
+      onEditingChange(null);
+    }
+  };
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-12 gap-2 md:gap-4 px-4 py-3 hover:bg-gray-50 transition-colors">
       {/* Form Name & Department */}
       <div className="col-span-1 md:col-span-4">
-        <Link
-          to={`/form/${form.id}`}
-          className="font-medium text-[#1A202C] hover:text-[#3182CE] transition-colors"
-        >
-          {getFormTitle(form, displayLanguage)}
-        </Link>
+        <div className="flex items-center gap-2">
+          {/* Title - editable in admin mode */}
+          {isEditing ? (
+            <input
+              type="text"
+              value={editingTitle.value}
+              onChange={(e) => onEditingChange({ ...editingTitle, value: e.target.value })}
+              onBlur={() => onSaveTitle(editingTitle.formId, editingTitle.language, editingTitle.value)}
+              onKeyDown={handleKeyDown}
+              autoFocus
+              className="flex-1 px-2 py-1 text-sm border border-blue-400 rounded focus:outline-none focus:ring-2 focus:ring-blue-300"
+            />
+          ) : (
+            <Link
+              to={canEdit ? '#' : `/form/${form.id}`}
+              onClick={(e) => {
+                if (canEdit) {
+                  e.preventDefault();
+                }
+              }}
+              onDoubleClick={() => {
+                if (canEdit) {
+                  onStartEdit(form, selectedLanguage);
+                }
+              }}
+              className={`font-medium text-[#1A202C] hover:text-[#3182CE] transition-colors ${
+                canEdit ? 'cursor-text' : ''
+              }`}
+              title={canEdit ? 'Double-click to edit' : undefined}
+            >
+              {isAdminMode ? getTitleForLanguage(selectedLanguage) : getFormLocalizedTitle(form, displayLanguage)}
+            </Link>
+          )}
+          {/* Language Badges - clickable in admin mode */}
+          {form.languages && form.languages.length > 0 && (
+            <div className="flex gap-0.5 ml-auto">
+              {form.languages.includes('en') && (
+                <button
+                  onClick={() => isAdminMode && onSelectLanguage('en')}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                    isAdminMode && selectedLanguage === 'en'
+                      ? 'bg-blue-500 text-white ring-2 ring-blue-300'
+                      : 'bg-blue-100 text-blue-700'
+                  } ${isAdminMode ? 'cursor-pointer hover:bg-blue-200' : ''}`}
+                >
+                  EN
+                </button>
+              )}
+              {form.languages.includes('si') && (
+                <button
+                  onClick={() => isAdminMode && onSelectLanguage('si')}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                    isAdminMode && selectedLanguage === 'si'
+                      ? 'bg-green-500 text-white ring-2 ring-green-300'
+                      : 'bg-green-100 text-green-700'
+                  } ${isAdminMode ? 'cursor-pointer hover:bg-green-200' : ''}`}
+                >
+                  SI
+                </button>
+              )}
+              {form.languages.includes('ta') && (
+                <button
+                  onClick={() => isAdminMode && onSelectLanguage('ta')}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                    isAdminMode && selectedLanguage === 'ta'
+                      ? 'bg-orange-500 text-white ring-2 ring-orange-300'
+                      : 'bg-orange-100 text-orange-700'
+                  } ${isAdminMode ? 'cursor-pointer hover:bg-orange-200' : ''}`}
+                >
+                  TA
+                </button>
+              )}
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-1 mt-1">
           <Building2 className="w-3 h-3 text-gray-400 flex-shrink-0" />
-          <span className="text-[11px] text-[#718096]">{form.institution}</span>
+          <span className="text-[11px] text-[#718096]">
+            {institution ? getInstitutionLocalizedName(institution, displayLanguage) : form.institutionId}
+          </span>
         </div>
         <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-[11px] text-[#3182CE]">{form.category}</span>
+          <span className="text-[11px] text-[#3182CE]">
+            {category ? getCategoryLocalizedName(category, displayLanguage) : form.categoryId}
+          </span>
           {form.verificationLevel > 0 && (
             <span
               className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -472,22 +727,81 @@ function ListViewRow({ form, displayLanguage }: { form: Form; displayLanguage: L
 }
 
 // Grid View - visual cards
-function GridView({ forms, displayLanguage }: { forms: Form[]; displayLanguage: Language }) {
+function GridView({
+  forms,
+  displayLanguage,
+  isAdminMode,
+  selectedLanguage,
+  onSelectLanguage,
+  editingTitle,
+  onStartEdit,
+  onSaveTitle,
+  onEditingChange,
+  categoryMap,
+  institutionMap,
+}: ListViewProps) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
       {forms.map((form) => (
-        <GridViewCard key={form.id} form={form} displayLanguage={displayLanguage} />
+        <GridViewCard
+          key={form.id}
+          form={form}
+          displayLanguage={displayLanguage}
+          isAdminMode={isAdminMode}
+          selectedLanguage={selectedLanguage}
+          onSelectLanguage={onSelectLanguage}
+          editingTitle={editingTitle}
+          onStartEdit={onStartEdit}
+          onSaveTitle={onSaveTitle}
+          onEditingChange={onEditingChange}
+          categoryMap={categoryMap}
+          institutionMap={institutionMap}
+        />
       ))}
     </div>
   );
 }
 
-function GridViewCard({ form, displayLanguage }: { form: Form; displayLanguage: Language }) {
+function GridViewCard({
+  form,
+  displayLanguage,
+  isAdminMode,
+  selectedLanguage,
+  onSelectLanguage,
+  editingTitle,
+  onStartEdit,
+  onSaveTitle,
+  onEditingChange,
+  categoryMap,
+  institutionMap,
+}: ListViewRowProps) {
   const verification = VERIFICATION_LEVELS[form.verificationLevel];
-  const phones = form.telephoneNumbers?.slice(0, 2) || [];
-  const website = form.website;
-  const email = form.email;
-  const address = form.postAddress;
+  const phones = form.contactInfo?.telephoneNumbers?.slice(0, 2) || [];
+  const website = form.contactInfo?.website;
+  const email = form.contactInfo?.email;
+  const address = form.contactInfo?.address;
+
+  const isEditing = editingTitle?.formId === form.id;
+  const canEdit = isAdminMode;
+
+  const category = categoryMap.get(form.categoryId);
+  const institution = institutionMap.get(form.institutionId);
+
+  // Get title for the selected language in admin mode
+  const getTitleForLanguage = (lang: Language) => {
+    if (lang === 'en') return form.title;
+    if (lang === 'si') return form.titleSi || '';
+    if (lang === 'ta') return form.titleTa || '';
+    return form.title;
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && editingTitle) {
+      onSaveTitle(editingTitle.formId, editingTitle.language, editingTitle.value);
+    } else if (e.key === 'Escape') {
+      onEditingChange(null);
+    }
+  };
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow">
@@ -512,20 +826,89 @@ function GridViewCard({ form, displayLanguage }: { form: Form; displayLanguage: 
       </div>
 
       {/* Form Name - Full */}
-      <Link
-        to={`/form/${form.id}`}
-        className="block font-medium text-[#1A202C] hover:text-[#3182CE] mb-1"
-      >
-        {getFormTitle(form, displayLanguage)}
-      </Link>
+      {isEditing ? (
+        <input
+          type="text"
+          value={editingTitle.value}
+          onChange={(e) => onEditingChange({ ...editingTitle, value: e.target.value })}
+          onBlur={() => onSaveTitle(editingTitle.formId, editingTitle.language, editingTitle.value)}
+          onKeyDown={handleKeyDown}
+          autoFocus
+          className="w-full px-2 py-1 text-sm border border-blue-400 rounded focus:outline-none focus:ring-2 focus:ring-blue-300 mb-1"
+        />
+      ) : (
+        <Link
+          to={canEdit ? '#' : `/form/${form.id}`}
+          onClick={(e) => {
+            if (canEdit) {
+              e.preventDefault();
+            }
+          }}
+          onDoubleClick={() => {
+            if (canEdit) {
+              onStartEdit(form, selectedLanguage);
+            }
+          }}
+          className={`block font-medium text-[#1A202C] hover:text-[#3182CE] mb-1 ${
+            canEdit ? 'cursor-text' : ''
+          }`}
+          title={canEdit ? 'Double-click to edit' : undefined}
+        >
+          {isAdminMode ? getTitleForLanguage(selectedLanguage) : getFormLocalizedTitle(form, displayLanguage)}
+        </Link>
+      )}
+
+      {/* Language Badges - clickable in admin mode */}
+      {form.languages && form.languages.length > 0 && (
+        <div className="flex gap-0.5 mb-2">
+          {form.languages.includes('en') && (
+            <button
+              onClick={() => isAdminMode && onSelectLanguage('en')}
+              className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                isAdminMode && selectedLanguage === 'en'
+                  ? 'bg-blue-500 text-white ring-2 ring-blue-300'
+                  : 'bg-blue-100 text-blue-700'
+              } ${isAdminMode ? 'cursor-pointer hover:bg-blue-200' : ''}`}
+            >
+              EN
+            </button>
+          )}
+          {form.languages.includes('si') && (
+            <button
+              onClick={() => isAdminMode && onSelectLanguage('si')}
+              className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                isAdminMode && selectedLanguage === 'si'
+                  ? 'bg-green-500 text-white ring-2 ring-green-300'
+                  : 'bg-green-100 text-green-700'
+              } ${isAdminMode ? 'cursor-pointer hover:bg-green-200' : ''}`}
+            >
+              SI
+            </button>
+          )}
+          {form.languages.includes('ta') && (
+            <button
+              onClick={() => isAdminMode && onSelectLanguage('ta')}
+              className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                isAdminMode && selectedLanguage === 'ta'
+                  ? 'bg-orange-500 text-white ring-2 ring-orange-300'
+                  : 'bg-orange-100 text-orange-700'
+              } ${isAdminMode ? 'cursor-pointer hover:bg-orange-200' : ''}`}
+            >
+              TA
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Department & Category */}
       <div className="text-[11px] text-[#718096] mb-3">
         <div className="flex items-center gap-1">
           <Building2 className="w-3 h-3" />
-          <span>{form.institution}</span>
+          <span>{institution ? getInstitutionLocalizedName(institution, displayLanguage) : form.institutionId}</span>
         </div>
-        <span className="text-[#3182CE]">{form.category}</span>
+        <span className="text-[#3182CE]">
+          {category ? getCategoryLocalizedName(category, displayLanguage) : form.categoryId}
+        </span>
       </div>
 
       {/* Contact Info */}

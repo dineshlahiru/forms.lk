@@ -12,56 +12,27 @@ import {
   CheckCircle,
   Users,
   Search,
+  Loader2,
 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/ui/Button';
-import { sampleForms } from '../data/sampleForms';
-import { getCustomForms, type StoredForm } from '../utils/formsStorage';
-import type { Form } from '../types';
-
-// Storage key for sample form title overrides
-const TITLE_OVERRIDES_KEY = 'forms-lk-title-overrides';
-
-function getTitleOverrides(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(TITLE_OVERRIDES_KEY) || '{}');
-  } catch {
-    return {};
-  }
-}
-
-// Convert StoredForm to Form type (simplified for search)
-function convertStoredToForm(stored: StoredForm): Form {
-  return {
-    id: stored.id,
-    title: stored.title,
-    institution: stored.institution,
-    category: stored.category,
-    description: stored.description || '',
-    pages: [],
-    downloads: stored.downloads || 0,
-    rating: stored.rating || 0,
-    ratingCount: stored.ratingCount || 0,
-    verificationLevel: (stored.verificationLevel || 0) as 0 | 1 | 2 | 3,
-    status: stored.status || 'published',
-    createdAt: stored.createdAt || new Date().toISOString(),
-    updatedAt: stored.updatedAt || new Date().toISOString(),
-    createdBy: 'admin',
-  };
-}
+import { useAllForms, useCategories } from '../hooks';
+import {
+  searchForms,
+  getFormLocalizedTitle,
+  getCategoryLocalizedName,
+} from '../services';
+import type { FirebaseForm } from '../types/firebase';
 
 export function HomePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [customForms, setCustomForms] = useState<Form[]>([]);
   const searchRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
-  // Load custom forms from localStorage
-  useEffect(() => {
-    const stored = getCustomForms();
-    setCustomForms(stored.map(convertStoredToForm));
-  }, []);
+  // Firebase hooks
+  const { data: forms, loading: formsLoading } = useAllForms();
+  const { data: categories, loading: categoriesLoading } = useCategories();
 
   // Close suggestions when clicking outside
   useEffect(() => {
@@ -74,30 +45,20 @@ export function HomePage() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Get all forms with title overrides applied
-  const allForms = useMemo(() => {
-    const titleOverrides = getTitleOverrides();
-    const sampleFormsWithOverrides = sampleForms.map(form => {
-      const override = titleOverrides[form.id];
-      return override ? { ...form, title: override } : form;
-    });
-    return [...customForms, ...sampleFormsWithOverrides];
-  }, [customForms]);
-
   // Filter suggestions based on search query
   const suggestions = useMemo(() => {
-    if (!searchQuery.trim() || searchQuery.length < 2) return [];
+    if (!searchQuery.trim() || searchQuery.length < 2 || !forms) return [];
+    return searchForms(forms, searchQuery).slice(0, 6); // Limit to 6 suggestions
+  }, [searchQuery, forms]);
 
-    const query = searchQuery.toLowerCase();
-    return allForms
-      .filter(form =>
-        form.title.toLowerCase().includes(query) ||
-        form.institution.toLowerCase().includes(query) ||
-        form.category.toLowerCase().includes(query) ||
-        form.description.toLowerCase().includes(query)
-      )
-      .slice(0, 6); // Limit to 6 suggestions
-  }, [searchQuery, allForms]);
+  // Get popular categories with form counts
+  const popularCategories = useMemo(() => {
+    if (!categories) return [];
+    return categories
+      .filter(cat => cat.isActive)
+      .sort((a, b) => b.formCount - a.formCount)
+      .slice(0, 6);
+  }, [categories]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,7 +70,7 @@ export function HomePage() {
     }
   };
 
-  const handleSuggestionClick = (form: Form) => {
+  const handleSuggestionClick = (form: FirebaseForm) => {
     setShowSuggestions(false);
     setSearchQuery('');
     navigate(`/form/${form.id}`);
@@ -167,9 +128,11 @@ export function HomePage() {
                       >
                         <FileText className="w-5 h-5 text-[#3182CE] mt-0.5 flex-shrink-0" />
                         <div className="flex-1 min-w-0">
-                          <div className="font-medium text-gray-900 truncate">{form.title}</div>
+                          <div className="font-medium text-gray-900 truncate">
+                            {getFormLocalizedTitle(form, 'en')}
+                          </div>
                           <div className="text-sm text-gray-500 truncate">
-                            {form.institution} • {form.category}
+                            {form.institutionId} • {form.categoryId}
                           </div>
                         </div>
                       </button>
@@ -376,28 +339,29 @@ export function HomePage() {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            {[
-              { name: 'Divisional Secretariat', count: 25 },
-              { name: 'Police', count: 12 },
-              { name: 'Banks', count: 18 },
-              { name: 'Motor Traffic', count: 15 },
-              { name: 'Education', count: 20 },
-              { name: 'Immigration', count: 8 },
-            ].map((cat) => (
-              <Link
-                key={cat.name}
-                to={`/forms?category=${encodeURIComponent(cat.name)}`}
-                className="bg-white rounded-xl p-6 text-center hover:shadow-md transition-shadow group"
-              >
-                <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center mx-auto mb-3 group-hover:bg-blue-100 transition-colors">
-                  <FileText className="w-6 h-6 text-[#3182CE]" />
-                </div>
-                <h3 className="font-medium text-sm text-gray-800 mb-1">{cat.name}</h3>
-                <p className="text-xs text-gray-500">{cat.count} forms</p>
-              </Link>
-            ))}
-          </div>
+          {categoriesLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+              {popularCategories.map((cat) => (
+                <Link
+                  key={cat.id}
+                  to={`/forms?category=${encodeURIComponent(cat.id)}`}
+                  className="bg-white rounded-xl p-6 text-center hover:shadow-md transition-shadow group"
+                >
+                  <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center mx-auto mb-3 group-hover:bg-blue-100 transition-colors">
+                    <FileText className="w-6 h-6 text-[#3182CE]" />
+                  </div>
+                  <h3 className="font-medium text-sm text-gray-800 mb-1">
+                    {getCategoryLocalizedName(cat, 'en')}
+                  </h3>
+                  <p className="text-xs text-gray-500">{cat.formCount} forms</p>
+                </Link>
+              ))}
+            </div>
+          )}
 
           <div className="text-center mt-10">
             <Link to="/forms" className="text-[#3182CE] hover:text-[#2B6CB0] font-medium inline-flex items-center gap-1">
@@ -438,7 +402,9 @@ export function HomePage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
             <div>
-              <div className="text-4xl font-bold text-[#1A365D] mb-2">100+</div>
+              <div className="text-4xl font-bold text-[#1A365D] mb-2">
+                {formsLoading ? '...' : `${forms?.length || 0}+`}
+              </div>
               <div className="text-[#718096]">Forms Available</div>
             </div>
             <div>

@@ -1,16 +1,44 @@
 import { useState, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Download, Printer, AlertCircle } from 'lucide-react';
+import { useParams, Link, Navigate } from 'react-router-dom';
+import { ArrowLeft, Download, Printer, AlertCircle, Loader2 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/ui/Button';
-import { getFormById } from '../data/sampleForms';
+import { useForm, useFormFields } from '../hooks';
+import { getFormById as getSampleFormById } from '../data/sampleForms';
 import type { FormElement } from '../types';
 
 export function FormFillerPage() {
   const { formId } = useParams<{ formId: string }>();
-  const form = getFormById(formId || '');
+
+  // Try loading from Firebase/local database first
+  const { data: dbForm, loading: dbLoading } = useForm(formId);
+  const { data: dbFields } = useFormFields(formId);
+
+  // Fallback to sample forms for demo
+  const sampleForm = getSampleFormById(formId || '');
+
   const [values, setValues] = useState<Record<string, string | string[] | boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // If loading, show loading state
+  if (dbLoading) {
+    return (
+      <Layout>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 text-center">
+          <Loader2 className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin" />
+          <h1 className="text-2xl font-bold text-[#1A202C] mb-4">Loading Form...</h1>
+        </div>
+      </Layout>
+    );
+  }
+
+  // If the form is from database and has PDF overlay capability, redirect to advanced filler
+  if (dbForm && dbForm.hasOnlineFill) {
+    return <Navigate to={`/fill/advanced/${formId}`} replace />;
+  }
+
+  // Use sample form for demo (database forms redirect to advanced filler)
+  const form = sampleForm;
 
   const allElements = useMemo(() => {
     if (!form) return [];

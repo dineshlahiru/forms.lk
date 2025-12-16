@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -16,15 +16,28 @@ import {
   Eye,
   EyeOff,
   Trash2,
+  Loader2,
 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/ui/Button';
-import {
-  getFormById as getCustomFormById,
-  updateForm,
-  type FormFieldData,
-  type FieldPosition,
-} from '../utils/formsStorage';
+import { useForm, useFormFields } from '../hooks';
+import { getFileAsDataUrl, updateFormField } from '../services';
+import type { Language, FieldPosition } from '../types/firebase';
+
+// Simplified field data for filling
+interface FormFieldData {
+  id: string;
+  type: string;
+  label: string;
+  labelSi?: string;
+  labelTa?: string;
+  page: number;
+  required: boolean;
+  placeholder?: string;
+  options?: { value: string; label: string }[];
+  helpText?: string;
+  position?: Omit<FieldPosition, 'page'>; // Position without page (page is on field)
+}
 
 type Mode = 'fill' | 'map';
 
@@ -40,22 +53,99 @@ export function AdvancedFormFillerPage() {
   const [showOverlay, setShowOverlay] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [dragPosition, setDragPosition] = useState<{ fieldId: string; x: number; y: number } | null>(null);
+  const [pdfPages, setPdfPages] = useState<string[]>([]);
+  const [pdfLoading, setPdfLoading] = useState(true);
+  const [selectedLanguage, setSelectedLanguage] = useState<Language>('en');
   const pdfContainerRef = useRef<HTMLDivElement>(null);
 
-  // Load form from localStorage
-  const [form, setForm] = useState(() => {
-    if (!formId) return null;
-    return getCustomFormById(formId);
-  });
+  // Load form from Firebase/local database
+  const { data: form, loading: formLoading, error: formError } = useForm(formId);
+  const { data: formFields, refetch: refetchFields } = useFormFields(formId);
 
-  // Reload form data
-  const reloadForm = useCallback(() => {
-    if (formId) {
-      setForm(getCustomFormById(formId));
+  // Load PDF pages from storage
+  useEffect(() => {
+    async function loadPdfPages() {
+      if (!form) return;
+
+      setPdfLoading(true);
+      try {
+        // Try to load thumbnails first
+        const thumbnails = form.thumbnails?.[selectedLanguage] || form.thumbnails?.en || [];
+        if (thumbnails.length > 0) {
+          // Load each thumbnail from storage
+          const loadedPages: string[] = [];
+          for (const thumbPath of thumbnails) {
+            const dataUrl = await getFileAsDataUrl(thumbPath);
+            if (dataUrl) {
+              loadedPages.push(dataUrl);
+            }
+          }
+          if (loadedPages.length > 0) {
+            setPdfPages(loadedPages);
+            setPdfLoading(false);
+            return;
+          }
+        }
+
+        // If no thumbnails, try to load PDF directly
+        const pdfVariant = form.pdfVariants?.[selectedLanguage] || form.pdfVariants?.en;
+        if (pdfVariant?.storagePath) {
+          const pdfData = await getFileAsDataUrl(pdfVariant.storagePath);
+          if (pdfData) {
+            // PDF is loaded as base64 - use it directly as single page preview
+            setPdfPages([pdfData]);
+          }
+        }
+      } catch (err) {
+        console.error('Error loading PDF pages:', err);
+      } finally {
+        setPdfLoading(false);
+      }
     }
-  }, [formId]);
 
-  if (!form) {
+    loadPdfPages();
+  }, [form, selectedLanguage]);
+
+  // Convert form fields to local format
+  const fields: FormFieldData[] = (formFields || []).map(f => ({
+    id: f.id,
+    type: f.type,
+    label: f.label,
+    labelSi: f.labelSi,
+    labelTa: f.labelTa,
+    page: f.position?.page || 1, // Get page from position
+    required: f.required,
+    placeholder: f.placeholder,
+    options: f.options?.map(o => ({ value: o.value, label: o.label })),
+    helpText: f.helpText,
+    position: f.position ? {
+      x: f.position.x,
+      y: f.position.y,
+      width: f.position.width,
+      height: f.position.height,
+      fontSize: f.position.fontSize,
+      align: f.position.align,
+    } : undefined,
+  }));
+
+  // Reload form fields data
+  const reloadForm = useCallback(() => {
+    refetchFields();
+  }, [refetchFields]);
+
+  if (formLoading || pdfLoading) {
+    return (
+      <Layout>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 text-center">
+          <Loader2 className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin" />
+          <h1 className="text-2xl font-bold text-[#1A202C] mb-4">Loading Form...</h1>
+        </div>
+      </Layout>
+    );
+  }
+
+  if (formError || !form) {
     return (
       <Layout>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 text-center">
@@ -69,9 +159,6 @@ export function AdvancedFormFillerPage() {
       </Layout>
     );
   }
-
-  const pdfPages = form.pdfPages || [];
-  const fields = form.fields || [];
 
   // Get fields for current page
   const currentPageFields = fields.filter(f => f.page === currentPage + 1);
@@ -157,34 +244,33 @@ export function AdvancedFormFillerPage() {
   };
 
   // Handle PDF click for mapping mode
-  const handlePdfClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (mode !== 'map' || !selectedFieldId || !pdfContainerRef.current) return;
+  const handlePdfClick = async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (mode !== 'map' || !selectedFieldId || !pdfContainerRef.current || !formId) return;
 
     const rect = pdfContainerRef.current.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 100;
     const y = ((e.clientY - rect.top) / rect.height) * 100;
 
-    // Update field position
-    const updatedFields = fields.map(f => {
-      if (f.id === selectedFieldId) {
-        return {
-          ...f,
-          position: {
-            x,
-            y,
-            width: f.position?.width || 20,
-            height: f.position?.height || 3,
-            fontSize: f.position?.fontSize || 12,
-            align: f.position?.align || 'left' as const,
-          },
-        };
-      }
-      return f;
-    });
+    const field = fields.find(f => f.id === selectedFieldId);
+    if (!field) return;
 
-    // Save to storage
-    updateForm(form.id, { fields: updatedFields });
-    reloadForm();
+    // Update field position in database
+    try {
+      await updateFormField(formId, selectedFieldId, {
+        position: {
+          page: currentPage + 1,
+          x,
+          y,
+          width: field.position?.width || 20,
+          height: field.position?.height || 3,
+          fontSize: field.position?.fontSize || 12,
+          align: field.position?.align || 'left',
+        },
+      });
+      reloadForm();
+    } catch (err) {
+      console.error('Failed to update field position:', err);
+    }
   };
 
   // Handle drag for repositioning
@@ -209,47 +295,70 @@ export function AdvancedFormFillerPage() {
     const newX = Math.max(0, Math.min(100, field.position.x + deltaX));
     const newY = Math.max(0, Math.min(100, field.position.y + deltaY));
 
-    const updatedFields = fields.map(f => {
-      if (f.id === selectedFieldId && f.position) {
-        return { ...f, position: { ...f.position, x: newX, y: newY } };
-      }
-      return f;
-    });
-
-    updateForm(form.id, { fields: updatedFields });
-    reloadForm();
+    // Update local drag preview
+    setDragPosition({ fieldId: selectedFieldId, x: newX, y: newY });
     setDragStart({ x: e.clientX, y: e.clientY });
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = async () => {
+    // Save final position to database
+    if (isDragging && selectedFieldId && dragPosition && formId) {
+      const field = fields.find(f => f.id === selectedFieldId);
+      if (field?.position) {
+        try {
+          await updateFormField(formId, selectedFieldId, {
+            position: {
+              ...field.position,
+              page: field.page,
+              x: dragPosition.x,
+              y: dragPosition.y,
+            },
+          });
+          reloadForm();
+        } catch (err) {
+          console.error('Failed to update field position:', err);
+        }
+      }
+    }
     setIsDragging(false);
     setDragStart(null);
+    setDragPosition(null);
   };
 
   // Update field position property
-  const updateFieldPosition = (fieldId: string, key: keyof FieldPosition, value: number | string) => {
-    const updatedFields = fields.map(f => {
-      if (f.id === fieldId && f.position) {
-        return { ...f, position: { ...f.position, [key]: value } };
-      }
-      return f;
-    });
-    updateForm(form.id, { fields: updatedFields });
-    reloadForm();
+  const updateFieldPosition = async (fieldId: string, key: keyof FieldPosition, value: number | string) => {
+    if (!formId) return;
+
+    const field = fields.find(f => f.id === fieldId);
+    if (!field?.position) return;
+
+    try {
+      await updateFormField(formId, fieldId, {
+        position: {
+          ...field.position,
+          page: field.page,
+          [key]: value,
+        },
+      });
+      reloadForm();
+    } catch (err) {
+      console.error('Failed to update field position:', err);
+    }
   };
 
   // Remove field position
-  const removeFieldPosition = (fieldId: string) => {
-    const updatedFields = fields.map(f => {
-      if (f.id === fieldId) {
-        const { position, ...rest } = f;
-        return rest as FormFieldData;
-      }
-      return f;
-    });
-    updateForm(form.id, { fields: updatedFields });
-    reloadForm();
-    setSelectedFieldId(null);
+  const removeFieldPosition = async (fieldId: string) => {
+    if (!formId) return;
+
+    try {
+      await updateFormField(formId, fieldId, {
+        position: null as unknown as undefined, // Pass null to clear position in database
+      });
+      reloadForm();
+      setSelectedFieldId(null);
+    } catch (err) {
+      console.error('Failed to remove field position:', err);
+    }
   };
 
   // Check if option looks like "Other"
@@ -611,11 +720,14 @@ export function AdvancedFormFillerPage() {
                       if (!field.position) return null;
                       const displayValue = getFieldDisplayValue(field);
                       const isSelected = selectedFieldId === field.id;
+                      // Use drag position if currently dragging this field
+                      const posX = (dragPosition?.fieldId === field.id) ? dragPosition.x : field.position.x;
+                      const posY = (dragPosition?.fieldId === field.id) ? dragPosition.y : field.position.y;
 
                       return (
                         <div
                           key={field.id}
-                          className={`absolute cursor-${mode === 'map' ? 'move' : 'default'} ${
+                          className={`absolute ${mode === 'map' ? 'cursor-move' : 'cursor-default'} ${
                             mode === 'map'
                               ? isSelected
                                 ? 'border-2 border-blue-500 bg-blue-100/50'
@@ -623,8 +735,8 @@ export function AdvancedFormFillerPage() {
                               : ''
                           }`}
                           style={{
-                            left: `${field.position.x}%`,
-                            top: `${field.position.y}%`,
+                            left: `${posX}%`,
+                            top: `${posY}%`,
                             width: `${field.position.width}%`,
                             minHeight: `${field.position.height}%`,
                             fontSize: `${(field.position.fontSize || 12) * (zoom / 100)}px`,

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import {
   ArrowLeft,
   Upload,
@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Plus,
   Save,
+  Eye,
   Settings,
   Wand2,
   Image as ImageIcon,
@@ -31,37 +32,19 @@ import { Button } from '../components/ui/Button';
 import * as pdfjsLib from 'pdfjs-dist';
 import Anthropic from '@anthropic-ai/sdk';
 import {
+  saveForm,
+  generateFormId,
   fileToBase64,
   detectLanguageFromFilename,
+  type StoredForm,
+  type StoredLanguageVariant,
 } from '../utils/formsStorage';
-import {
-  saveFormLocally,
-  generateFormId,
-  type LocalFormData,
-} from '../services';
-import { useUploadQueue } from '../context/UploadQueueContext';
-import {
-  getInstitutions,
-  addInstitution,
-  type Institution,
-} from '../utils/institutionsStorage';
 import { LANGUAGES, type Language } from '../types';
-import { Building2, ZoomIn, ZoomOut } from 'lucide-react';
 // @ts-ignore - Vite handles this import
 import PdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 // Set up PDF.js worker using Vite's URL import
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorker;
-
-// Extract media type from base64 data URL (e.g., "data:image/jpeg;base64,..." -> "image/jpeg")
-function getMediaType(dataUrl: string): 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' {
-  const match = dataUrl.match(/^data:(image\/[a-z]+);base64,/);
-  if (match) {
-    const type = match[1] as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
-    return type;
-  }
-  return 'image/jpeg'; // Default to JPEG since we now use JPEG for PDF pages
-}
 
 // Field position for PDF overlay mapping
 interface FieldPosition {
@@ -76,31 +59,21 @@ interface FieldPosition {
 interface FormField {
   id: string;
   type: 'text' | 'date' | 'checkbox' | 'radio' | 'dropdown' | 'paragraph' | 'signature';
-  // Multi-language labels
-  labelEn: string;
-  labelSi?: string;
-  labelTa?: string;
+  label: string;
   page: number;
   required: boolean;
   placeholder?: string;
-  placeholderSi?: string;
-  placeholderTa?: string;
   options?: string[];
   helpText?: string;
-  helpTextSi?: string;
-  helpTextTa?: string;
-  // Position on PDF for overlay (shared across all languages - same layout)
+  // Position on PDF for overlay
   position?: FieldPosition;
 }
 
 interface FormMetadata {
-  section: string;       // Government section number
-  formNumber: string;    // Government form number
   title: string;
   titleSi: string;  // Sinhala title
   titleTa: string;  // Tamil title
   institution: string;
-  institutionId: string; // Reference to saved institution
   category: string;
   description: string;
   postAddress: string;
@@ -112,7 +85,7 @@ interface FormMetadata {
   officialLocation: string;
 }
 
-type Step = 'upload' | 'select-pages' | 'processing' | 'edit';
+type Step = 'upload' | 'select-pages' | 'processing' | 'edit' | 'publish';
 
 const CATEGORIES = [
   'Divisional Secretariat',
@@ -178,7 +151,7 @@ export function FormDigitizerPage() {
   // Master page and language selection
   const [masterPageIndex, setMasterPageIndex] = useState(0);
   const [masterLanguage, setMasterLanguage] = useState<Language>('en');
-  const [_fileLanguageAssignments, _setFileLanguageAssignments] = useState<Map<string, Language>>(new Map());
+  const [_fileLanguageAssignments, setFileLanguageAssignments] = useState<Map<string, Language>>(new Map());
 
   // Edit step preview language
   const [editPreviewLanguage, setEditPreviewLanguage] = useState<Language>('en');
@@ -188,25 +161,16 @@ export function FormDigitizerPage() {
   const [categorySearch, setCategorySearch] = useState('');
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
 
-  // All languages in one PDF flag
-  const [allLanguagesInOne, setAllLanguagesInOne] = useState(false);
-
   // Field placement state
   const [placementMode, setPlacementMode] = useState(false);
   const [selectedFieldForPlacement, setSelectedFieldForPlacement] = useState<string | null>(null);
   const [showFieldPopup, setShowFieldPopup] = useState<{ fieldId: string; x: number; y: number } | null>(null);
 
-  // Field dragging state
-  const [draggingField, setDraggingField] = useState<{ fieldId: string; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
-
   const [metadata, setMetadata] = useState<FormMetadata>({
-    section: '',
-    formNumber: '',
     title: '',
     titleSi: '',
     titleTa: '',
     institution: '',
-    institutionId: '',
     category: '',
     description: '',
     postAddress: '',
@@ -217,35 +181,12 @@ export function FormDigitizerPage() {
     website: '',
     officialLocation: '',
   });
-
-  // PDF Zoom state
-  const [pdfZoom, setPdfZoom] = useState(100);
-  const ZOOM_LEVELS = [100, 110, 120, 130, 150, 175, 200];
-
-  // Institution state
-  const [allInstitutions, setAllInstitutions] = useState<Institution[]>([]);
-  const [institutionSearch, setInstitutionSearch] = useState('');
-  const [showInstitutionDropdown, setShowInstitutionDropdown] = useState(false);
-  const [showInstitutionModal, setShowInstitutionModal] = useState(false);
-  const [newInstitution, setNewInstitution] = useState({
-    name: '',
-    address: '',
-    openingHours: '',
-    telephoneNumbers: [''],
-    email: '',
-    website: '',
-  });
-
   const [apiKey, setApiKey] = useState('');
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
   const [error, setError] = useState('');
   const [editingField, setEditingField] = useState<string | null>(null);
-
-  // Navigation and upload queue
-  const navigate = useNavigate();
-  const { startUpload } = useUploadQueue();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pdfPreviewRef = useRef<HTMLDivElement>(null);
@@ -258,20 +199,12 @@ export function FormDigitizerPage() {
     }
   }, []);
 
-  // Load institutions from localStorage
-  useEffect(() => {
-    setAllInstitutions(getInstitutions());
-  }, []);
-
   // Close category dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest('.category-dropdown-container')) {
         setShowCategoryDropdown(false);
-      }
-      if (!target.closest('.institution-dropdown-container')) {
-        setShowInstitutionDropdown(false);
       }
     };
     document.addEventListener('click', handleClickOutside);
@@ -324,8 +257,7 @@ export function FormDigitizerPage() {
 
         // @ts-ignore - pdf.js types may vary between versions
         await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-        // Use JPEG with 70% quality to reduce storage size
-        pageImages.push(canvas.toDataURL('image/jpeg', 0.7));
+        pageImages.push(canvas.toDataURL('image/png'));
 
         // Check if page has text content
         const textContent = await page.getTextContent();
@@ -503,7 +435,7 @@ export function FormDigitizerPage() {
                       type: 'image',
                       source: {
                         type: 'base64',
-                        media_type: getMediaType(titleImage),
+                        media_type: 'image/png',
                         data: titleImage.split(',')[1],
                       },
                     },
@@ -531,7 +463,7 @@ export function FormDigitizerPage() {
         type: 'image' as const,
         source: {
           type: 'base64' as const,
-          media_type: getMediaType(img),
+          media_type: 'image/png' as const,
           data: img.split(',')[1],
         },
       }));
@@ -615,16 +547,7 @@ Return ONLY valid JSON in this exact format:
       }
 
       if (parsed.fields && Array.isArray(parsed.fields)) {
-        // Convert AI-extracted fields to multi-language format
-        // AI extracts English labels, which become labelEn
-        const convertedFields: FormField[] = parsed.fields.map((f: { id: string; type: string; label: string; page: number; required: boolean; placeholder?: string; options?: string[]; helpText?: string }) => ({
-          ...f,
-          labelEn: f.label, // Use the extracted label as English label
-          labelSi: undefined,
-          labelTa: undefined,
-          type: f.type as FormField['type'],
-        }));
-        setFields(convertedFields);
+        setFields(parsed.fields);
       }
 
       setStep('edit');
@@ -683,8 +606,7 @@ Return ONLY valid JSON in this exact format:
           canvas.height = viewport.height;
           const ctx = canvas.getContext('2d')!;
           await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-          // Use JPEG with 70% quality to reduce storage size
-          pageImages.push(canvas.toDataURL('image/jpeg', 0.7));
+          pageImages.push(canvas.toDataURL('image/png'));
 
           const textContent = await page.getTextContent();
           if (textContent.items.length > 0) {
@@ -748,9 +670,7 @@ Return ONLY valid JSON in this exact format:
     const newField: FormField = {
       id: `field-${Date.now()}`,
       type: 'text',
-      labelEn: 'New Field',
-      labelSi: undefined,
-      labelTa: undefined,
+      label: 'New Field',
       page: currentPage + 1,
       required: false,
     };
@@ -776,10 +696,8 @@ Return ONLY valid JSON in this exact format:
     if (!container) return;
 
     const rect = container.getBoundingClientRect();
-    // Add 1px offset so the field box starts after the click position
-    const offsetPx = 1;
-    const x = ((e.clientX - rect.left + offsetPx) / rect.width) * 100;
-    const y = ((e.clientY - rect.top + offsetPx) / rect.height) * 100;
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
 
     // Update field position
     updateField(selectedFieldForPlacement, {
@@ -830,62 +748,10 @@ Return ONLY valid JSON in this exact format:
     }));
   };
 
-  // Handle field drag start
-  const handleFieldDragStart = (e: React.MouseEvent, fieldId: string, field: FormField) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!field.position) return;
-
-    setDraggingField({
-      fieldId,
-      startX: e.clientX,
-      startY: e.clientY,
-      startPosX: field.position.x,
-      startPosY: field.position.y,
-    });
-    setShowFieldPopup(null);
-  };
-
-  // Handle field drag move
-  const handleFieldDragMove = useCallback((e: MouseEvent) => {
-    if (!draggingField || !pdfPreviewRef.current) return;
-
-    const container = pdfPreviewRef.current;
-    const rect = container.getBoundingClientRect();
-
-    // Calculate delta in percentage
-    const deltaX = ((e.clientX - draggingField.startX) / rect.width) * 100;
-    const deltaY = ((e.clientY - draggingField.startY) / rect.height) * 100;
-
-    // Calculate new position with bounds checking
-    const newX = Math.max(0, Math.min(100, draggingField.startPosX + deltaX));
-    const newY = Math.max(0, Math.min(100, draggingField.startPosY + deltaY));
-
-    updateFieldPosition(draggingField.fieldId, { x: newX, y: newY });
-  }, [draggingField]);
-
-  // Handle field drag end
-  const handleFieldDragEnd = useCallback(() => {
-    setDraggingField(null);
-  }, []);
-
-  // Add/remove mouse event listeners for dragging
-  useEffect(() => {
-    if (draggingField) {
-      window.addEventListener('mousemove', handleFieldDragMove);
-      window.addEventListener('mouseup', handleFieldDragEnd);
-      return () => {
-        window.removeEventListener('mousemove', handleFieldDragMove);
-        window.removeEventListener('mouseup', handleFieldDragEnd);
-      };
-    }
-  }, [draggingField, handleFieldDragMove, handleFieldDragEnd]);
-
-  // Save and publish - save locally then start background upload
+  // Save and publish
   const handlePublish = async () => {
     setIsProcessing(true);
     setProcessingStatus('Saving form...');
-    setError('');
 
     try {
       // Convert PDF file to base64 for storage
@@ -894,8 +760,14 @@ Return ONLY valid JSON in this exact format:
         pdfData = await fileToBase64(pdfFile);
       }
 
+      // Create pages array from pdfPages
+      const formPages = pdfPages.map((_, index) => ({
+        id: `page-${index + 1}`,
+        elements: [] as import('../types').FormElement[],
+      }));
+
       // Convert language variants to storage format
-      const storedLanguageVariants: LocalFormData['languageVariants'] = [];
+      const storedLanguageVariants: StoredLanguageVariant[] = [];
       languageVariants.forEach((variant, lang) => {
         storedLanguageVariants.push({
           language: lang,
@@ -904,43 +776,30 @@ Return ONLY valid JSON in this exact format:
         });
       });
 
-      // Convert fields to storage format with positions and multi-language labels
+      // Convert fields to storage format with positions
       const storedFields = fields.map(f => ({
         id: f.id,
         type: f.type,
-        // Multi-language labels
-        labelEn: f.labelEn,
-        labelSi: f.labelSi,
-        labelTa: f.labelTa,
+        label: f.label,
         page: f.page,
         required: f.required,
         placeholder: f.placeholder,
-        placeholderSi: f.placeholderSi,
-        placeholderTa: f.placeholderTa,
         options: f.options,
         helpText: f.helpText,
-        helpTextSi: f.helpTextSi,
-        helpTextTa: f.helpTextTa,
         position: f.position,
       }));
 
-      // Generate form ID
-      const formId = generateFormId();
-
-      // Create local form data
-      const localFormData: LocalFormData = {
-        id: formId,
-        section: metadata.section || undefined,
-        formNumber: metadata.formNumber || undefined,
+      const formData: StoredForm = {
+        id: generateFormId(),
         title: metadata.title,
         titleSi: metadata.titleSi || undefined,
         titleTa: metadata.titleTa || undefined,
-        description: metadata.description || undefined,
-        categoryId: metadata.category,
-        institutionId: metadata.institutionId || metadata.institution,
-        tags: [],
-        languages: allLanguagesInOne ? ['en', 'si', 'ta'] as Language[] : selectedLanguages,
-        defaultLanguage: detectedLanguage,
+        institution: metadata.institution,
+        category: metadata.category,
+        description: metadata.description,
+        pages: formPages,
+        createdBy: 'admin',
+        // Contact info - using new format with all fields
         contactInfo: {
           address: metadata.postAddress || undefined,
           officeHours: metadata.officeHours || undefined,
@@ -950,28 +809,32 @@ Return ONLY valid JSON in this exact format:
           website: metadata.website || undefined,
           officialLocation: metadata.officialLocation || undefined,
         },
-        verificationLevel: 0,
-        pdfData: pdfData,
-        pdfPages: pdfPages,
-        languageVariants: storedLanguageVariants.length > 0 ? storedLanguageVariants : undefined,
+        // Form metadata
         fields: storedFields,
-        uploadStatus: 'pending',
+        pdfData: pdfData,
+        pdfPages: pdfPages, // Store page images for preview
+        isImagePdf: isImagePdf,
+        // Multi-language support
+        languageVariants: storedLanguageVariants.length > 0 ? storedLanguageVariants : undefined,
+        languages: selectedLanguages,
+        defaultLanguage: detectedLanguage,
+        // Default values
+        downloads: 0,
+        rating: 0,
+        ratingCount: 0,
+        verificationLevel: 0, // Unverified by default
+        status: 'published',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
 
-      // Save to localStorage (immediate)
-      saveFormLocally(localFormData);
-      console.log('Form saved locally:', formId);
+      saveForm(formData);
+      console.log('Form published:', formData.id);
 
-      // Start background upload
-      startUpload(formId);
-
-      // Navigate to admin page
-      navigate('/admin?tab=uploads');
+      setStep('publish');
     } catch (err) {
-      console.error('Failed to save form:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save form');
+      console.error('Failed to publish form:', err);
+      setError('Failed to publish form. Please try again.');
     } finally {
       setIsProcessing(false);
     }
@@ -1017,8 +880,7 @@ Return ONLY valid JSON in this exact format:
                 { key: 'select-pages', label: 'Select Pages' },
                 { key: 'processing', label: 'AI Analysis' },
                 { key: 'edit', label: 'Edit Fields' },
-                { key: 'uploading', label: 'Uploading' },
-                { key: 'publish', label: 'Complete' },
+                { key: 'publish', label: 'Publish' },
               ].map((s, i) => (
                 <div key={s.key} className="flex items-center">
                   <div
@@ -1138,33 +1000,6 @@ Return ONLY valid JSON in this exact format:
                         ))}
                       </div>
                     </div>
-                  </div>
-                )}
-
-                {/* All Languages in One PDF Checkbox */}
-                {!isMultiLangMode && (
-                  <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-lg">
-                    <label className="flex items-center gap-3 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={allLanguagesInOne}
-                        onChange={(e) => setAllLanguagesInOne(e.target.checked)}
-                        className="w-5 h-5 rounded border-purple-300 text-purple-600 focus:ring-purple-500"
-                      />
-                      <div>
-                        <span className="font-medium text-purple-900">This PDF contains all languages</span>
-                        <p className="text-xs text-purple-700 mt-0.5">
-                          Check this if the form has English, Sinhala & Tamil in one PDF file
-                        </p>
-                      </div>
-                      {allLanguagesInOne && (
-                        <div className="ml-auto flex gap-1">
-                          <span className="px-2 py-0.5 bg-purple-200 text-purple-800 rounded text-xs font-medium">EN</span>
-                          <span className="px-2 py-0.5 bg-purple-200 text-purple-800 rounded text-xs font-medium">SI</span>
-                          <span className="px-2 py-0.5 bg-purple-200 text-purple-800 rounded text-xs font-medium">TA</span>
-                        </div>
-                      )}
-                    </label>
                   </div>
                 )}
 
@@ -1382,29 +1217,6 @@ Return ONLY valid JSON in this exact format:
                     <ArrowLeft className="w-4 h-4 mr-2" />
                     Upload Different PDF
                   </Button>
-                  {/* Skip AI button for testing */}
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      // Skip AI analysis - go directly to edit with empty fields
-                      const sortedIndices = Array.from(selectedPages).sort((a, b) => a - b);
-                      const selectedPdfPages = sortedIndices.map(i => pdfPages[i]);
-                      setPdfPages(selectedPdfPages);
-                      setSelectedPages(new Set(selectedPdfPages.map((_, i) => i)));
-                      // Add sample test fields
-                      setFields([
-                        { id: 'field-1', type: 'text', labelEn: 'Full Name', labelSi: 'සම්පූර්ණ නම', labelTa: 'முழு பெயர்', page: 1, required: true },
-                        { id: 'field-2', type: 'text', labelEn: 'Address', page: 1, required: true },
-                        { id: 'field-3', type: 'date', labelEn: 'Date of Birth', page: 1, required: false },
-                        { id: 'field-4', type: 'text', labelEn: 'NIC Number', page: 1, required: true },
-                      ]);
-                      setStep('edit');
-                    }}
-                    disabled={selectedPages.size === 0}
-                    className="border-orange-300 text-orange-600 hover:bg-orange-50"
-                  >
-                    Skip AI (Test Mode)
-                  </Button>
                   <Button
                     variant="primary"
                     onClick={proceedWithSelectedPages}
@@ -1498,32 +1310,6 @@ Return ONLY valid JSON in this exact format:
                     >
                       <ChevronRight className="w-4 h-4" />
                     </button>
-                    {/* Zoom Controls */}
-                    <div className="ml-4 flex items-center gap-1 border-l border-gray-200 pl-4">
-                      <button
-                        onClick={() => {
-                          const currentIdx = ZOOM_LEVELS.indexOf(pdfZoom);
-                          if (currentIdx > 0) setPdfZoom(ZOOM_LEVELS[currentIdx - 1]);
-                        }}
-                        disabled={pdfZoom === ZOOM_LEVELS[0]}
-                        className="p-1 rounded hover:bg-gray-200 disabled:opacity-40"
-                        title="Zoom Out"
-                      >
-                        <ZoomOut className="w-4 h-4" />
-                      </button>
-                      <span className="text-xs text-gray-600 min-w-[40px] text-center">{pdfZoom}%</span>
-                      <button
-                        onClick={() => {
-                          const currentIdx = ZOOM_LEVELS.indexOf(pdfZoom);
-                          if (currentIdx < ZOOM_LEVELS.length - 1) setPdfZoom(ZOOM_LEVELS[currentIdx + 1]);
-                        }}
-                        disabled={pdfZoom === ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
-                        className="p-1 rounded hover:bg-gray-200 disabled:opacity-40"
-                        title="Zoom In"
-                      >
-                        <ZoomIn className="w-4 h-4" />
-                      </button>
-                    </div>
                   </div>
                 </div>
                 <div
@@ -1546,10 +1332,7 @@ Return ONLY valid JSON in this exact format:
                       : pdfPages;
                     return currentPages[currentPage];
                   })() && (
-                    <div
-                      className="relative origin-top-left transition-transform"
-                      style={{ width: `${pdfZoom}%` }}
-                    >
+                    <div className="relative">
                       <img
                         src={isMultiLangMode
                           ? (languageVariants.get(editPreviewLanguage)?.pdfPages || pdfPages)[currentPage]
@@ -1557,18 +1340,16 @@ Return ONLY valid JSON in this exact format:
                         alt={`Page ${currentPage + 1}`}
                         className="w-full rounded shadow-lg"
                       />
-                      {/* Field position markers - draggable */}
+                      {/* Field position markers */}
                       {fields
                         .filter(f => f.page === currentPage + 1 && f.position)
                         .map(f => (
                           <div
                             key={f.id}
-                            className={`absolute border-2 rounded transition-colors select-none ${
-                              draggingField?.fieldId === f.id
-                                ? 'border-orange-500 bg-orange-500/30 cursor-grabbing z-20'
-                                : showFieldPopup?.fieldId === f.id
-                                ? 'border-blue-500 bg-blue-500/20 cursor-grab'
-                                : 'border-green-500 bg-green-500/10 hover:bg-green-500/20 cursor-grab'
+                            className={`absolute border-2 rounded cursor-pointer transition-colors ${
+                              showFieldPopup?.fieldId === f.id
+                                ? 'border-blue-500 bg-blue-500/20'
+                                : 'border-green-500 bg-green-500/10 hover:bg-green-500/20'
                             }`}
                             style={{
                               left: `${f.position!.x}%`,
@@ -1576,22 +1357,18 @@ Return ONLY valid JSON in this exact format:
                               width: `${f.position!.width}%`,
                               height: `${f.position!.height}%`,
                             }}
-                            onMouseDown={(e) => handleFieldDragStart(e, f.id, f)}
                             onClick={(e) => {
                               e.stopPropagation();
-                              // Only show popup if not dragging
-                              if (!draggingField) {
-                                setShowFieldPopup({
-                                  fieldId: f.id,
-                                  x: e.clientX,
-                                  y: e.clientY,
-                                });
-                              }
+                              setShowFieldPopup({
+                                fieldId: f.id,
+                                x: e.clientX,
+                                y: e.clientY,
+                              });
                             }}
-                            title={`${f.labelEn} - Drag to reposition`}
+                            title={f.label}
                           >
-                            <span className="absolute -top-5 left-0 text-xs bg-green-600 text-white px-1 rounded truncate max-w-[100px] pointer-events-none">
-                              {f.labelEn}
+                            <span className="absolute -top-5 left-0 text-xs bg-green-600 text-white px-1 rounded truncate max-w-[100px]">
+                              {f.label}
                             </span>
                           </div>
                         ))}
@@ -1615,9 +1392,9 @@ Return ONLY valid JSON in this exact format:
               </div>
 
               {/* Form Editor */}
-              <div className="flex flex-col gap-4 max-h-[calc(100vh-180px)]">
+              <div className="space-y-4">
                 {/* Metadata */}
-                <div className="bg-white rounded-xl border border-gray-200 p-4 flex-1 min-h-0 overflow-y-auto">
+                <div className="bg-white rounded-xl border border-gray-200 p-4 max-h-[calc(100vh-200px)] overflow-y-auto">
                   <h3 className="font-semibold text-[#1A202C] mb-4 flex items-center gap-2 sticky top-0 bg-white py-2 -mt-2 z-10">
                     <Edit3 className="w-4 h-4" />
                     Form Details
@@ -1671,57 +1448,26 @@ Return ONLY valid JSON in this exact format:
                   </div>
 
                   <div className="space-y-3">
-                    {/* Section and Form Number - Government identifiers */}
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Section</label>
-                        <input
-                          type="text"
-                          value={metadata.section}
-                          onChange={(e) => setMetadata({ ...metadata, section: e.target.value })}
-                          placeholder="e.g., 05/2024"
-                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Form Nr.</label>
-                        <input
-                          type="text"
-                          value={metadata.formNumber}
-                          onChange={(e) => setMetadata({ ...metadata, formNumber: e.target.value })}
-                          placeholder="e.g., GN-001"
-                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Multi-language titles - show when multi-lang mode OR allLanguagesInOne */}
-                    {(isMultiLangMode && languageVariants.size > 1) || allLanguagesInOne ? (
+                    {/* Multi-language titles */}
+                    {isMultiLangMode && languageVariants.size > 1 ? (
                       <div className="space-y-3">
-                        <label className="block text-sm font-medium text-gray-700">
-                          Form Titles *
-                          {allLanguagesInOne && (
-                            <span className="ml-2 text-xs font-normal text-purple-600">(All languages in one PDF)</span>
-                          )}
-                        </label>
+                        <label className="block text-sm font-medium text-gray-700">Form Titles *</label>
                         <div className="space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                          {/* English - always show for allLanguagesInOne or if variant exists */}
-                          {(allLanguagesInOne || languageVariants.has('en')) && (
+                          {languageVariants.has('en') && (
                             <div className="flex items-center gap-2">
-                              <span className="w-20 text-xs font-medium text-blue-600">English</span>
+                              <span className="w-20 text-xs font-medium text-gray-500">English</span>
                               <input
                                 type="text"
                                 value={metadata.title}
                                 onChange={(e) => setMetadata({ ...metadata, title: e.target.value })}
-                                placeholder="English title (from AI)"
+                                placeholder="English title"
                                 className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
                               />
                             </div>
                           )}
-                          {/* Sinhala - always show for allLanguagesInOne or if variant exists */}
-                          {(allLanguagesInOne || languageVariants.has('si')) && (
+                          {languageVariants.has('si') && (
                             <div className="flex items-center gap-2">
-                              <span className="w-20 text-xs font-medium text-green-600">සිංහල</span>
+                              <span className="w-20 text-xs font-medium text-gray-500">සිංහල</span>
                               <input
                                 type="text"
                                 value={metadata.titleSi}
@@ -1731,10 +1477,9 @@ Return ONLY valid JSON in this exact format:
                               />
                             </div>
                           )}
-                          {/* Tamil - always show for allLanguagesInOne or if variant exists */}
-                          {(allLanguagesInOne || languageVariants.has('ta')) && (
+                          {languageVariants.has('ta') && (
                             <div className="flex items-center gap-2">
-                              <span className="w-20 text-xs font-medium text-orange-600">தமிழ்</span>
+                              <span className="w-20 text-xs font-medium text-gray-500">தமிழ்</span>
                               <input
                                 type="text"
                                 value={metadata.titleTa}
@@ -1758,85 +1503,14 @@ Return ONLY valid JSON in this exact format:
                       </div>
                     )}
                     <div className="grid grid-cols-2 gap-3">
-                      <div className="relative institution-dropdown-container">
+                      <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Institution *</label>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            value={institutionSearch || metadata.institution}
-                            onChange={(e) => {
-                              setInstitutionSearch(e.target.value);
-                              setShowInstitutionDropdown(true);
-                            }}
-                            onFocus={() => setShowInstitutionDropdown(true)}
-                            placeholder="Search or add institution..."
-                            className="w-full px-3 py-2 pr-8 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                          />
-                          <Building2 className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                        </div>
-                        {/* Institution Dropdown */}
-                        {showInstitutionDropdown && (
-                          <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
-                            {allInstitutions
-                              .filter(inst =>
-                                inst.name.toLowerCase().includes((institutionSearch || '').toLowerCase())
-                              )
-                              .map((inst) => (
-                                <button
-                                  key={inst.id}
-                                  type="button"
-                                  onClick={() => {
-                                    // Select institution and auto-fill contact details
-                                    setMetadata({
-                                      ...metadata,
-                                      institution: inst.name,
-                                      institutionId: inst.id,
-                                      postAddress: inst.address || metadata.postAddress,
-                                      officeHours: inst.openingHours || metadata.officeHours,
-                                      telephoneNumbers: inst.telephoneNumbers?.length ? inst.telephoneNumbers : metadata.telephoneNumbers,
-                                      email: inst.email || metadata.email,
-                                      website: inst.website || metadata.website,
-                                    });
-                                    setInstitutionSearch('');
-                                    setShowInstitutionDropdown(false);
-                                  }}
-                                  className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 ${
-                                    metadata.institutionId === inst.id ? 'bg-blue-100 text-blue-700' : 'text-gray-700'
-                                  }`}
-                                >
-                                  <div className="font-medium">{inst.name}</div>
-                                  {inst.address && (
-                                    <div className="text-xs text-gray-500 truncate">{inst.address}</div>
-                                  )}
-                                </button>
-                              ))}
-                            {/* Add New Institution Option */}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setNewInstitution({
-                                  name: institutionSearch || '',
-                                  address: '',
-                                  openingHours: '',
-                                  telephoneNumbers: [''],
-                                  email: '',
-                                  website: '',
-                                });
-                                setShowInstitutionModal(true);
-                                setShowInstitutionDropdown(false);
-                              }}
-                              className="w-full text-left px-3 py-2 text-sm bg-green-50 text-green-700 hover:bg-green-100 border-t border-gray-100"
-                            >
-                              <Plus className="w-4 h-4 inline mr-2" />
-                              Add New Institution{institutionSearch ? `: "${institutionSearch}"` : ''}
-                            </button>
-                            {allInstitutions.filter(inst =>
-                              inst.name.toLowerCase().includes((institutionSearch || '').toLowerCase())
-                            ).length === 0 && !institutionSearch && (
-                              <div className="px-3 py-2 text-sm text-gray-500">No institutions found. Add one!</div>
-                            )}
-                          </div>
-                        )}
+                        <input
+                          type="text"
+                          value={metadata.institution}
+                          onChange={(e) => setMetadata({ ...metadata, institution: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                        />
                       </div>
                       <div className="relative category-dropdown-container">
                         <label className="block text-sm font-medium text-gray-700 mb-1">Category *</label>
@@ -2017,8 +1691,8 @@ Return ONLY valid JSON in this exact format:
                 </div>
 
                 {/* Fields */}
-                <div className="bg-white rounded-xl border border-gray-200 p-4 flex-1 min-h-0 overflow-y-auto">
-                  <div className="flex items-center justify-between mb-4 sticky top-0 bg-white py-2 -mt-2 z-10">
+                <div className="bg-white rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center justify-between mb-4">
                     <h3 className="font-semibold text-[#1A202C] flex items-center gap-2">
                       <FileText className="w-4 h-4" />
                       Form Fields ({fields.length})
@@ -2029,7 +1703,7 @@ Return ONLY valid JSON in this exact format:
                     </Button>
                   </div>
 
-                  <div className="space-y-2">
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto">
                     {fields.length === 0 ? (
                       <div className="text-center py-8 text-gray-500">
                         <FileText className="w-8 h-8 mx-auto mb-2 text-gray-300" />
@@ -2047,41 +1721,14 @@ Return ONLY valid JSON in this exact format:
                           }`}
                         >
                           {editingField === field.id ? (
-                            <div className="space-y-3">
-                              {/* Multi-language labels */}
-                              <div className="space-y-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
-                                <div className="text-xs font-medium text-gray-600 mb-1">Field Labels</div>
-                                <div className="flex items-center gap-2">
-                                  <span className="w-12 text-xs font-medium text-blue-600">EN</span>
-                                  <input
-                                    type="text"
-                                    value={field.labelEn}
-                                    onChange={(e) => updateField(field.id, { labelEn: e.target.value })}
-                                    className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm"
-                                    placeholder="English label *"
-                                  />
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="w-12 text-xs font-medium text-green-600">සිං</span>
-                                  <input
-                                    type="text"
-                                    value={field.labelSi || ''}
-                                    onChange={(e) => updateField(field.id, { labelSi: e.target.value || undefined })}
-                                    className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm"
-                                    placeholder="සිංහල ලේබලය"
-                                  />
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="w-12 text-xs font-medium text-orange-600">தமி</span>
-                                  <input
-                                    type="text"
-                                    value={field.labelTa || ''}
-                                    onChange={(e) => updateField(field.id, { labelTa: e.target.value || undefined })}
-                                    className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm"
-                                    placeholder="தமிழ் லேபிள்"
-                                  />
-                                </div>
-                              </div>
+                            <div className="space-y-2">
+                              <input
+                                type="text"
+                                value={field.label}
+                                onChange={(e) => updateField(field.id, { label: e.target.value })}
+                                className="w-full px-2 py-1 border border-gray-200 rounded text-sm"
+                                placeholder="Field label"
+                              />
                               <div className="grid grid-cols-3 gap-2">
                                 <select
                                   value={field.type}
@@ -2136,10 +1783,7 @@ Return ONLY valid JSON in this exact format:
                                 className="flex-1 cursor-pointer"
                                 onClick={() => setEditingField(field.id)}
                               >
-                                <span className="font-medium text-sm">{field.labelEn}</span>
-                                {(field.labelSi || field.labelTa) && (
-                                  <span className="text-xs text-green-600 ml-1">+{[field.labelSi, field.labelTa].filter(Boolean).length} lang</span>
-                                )}
+                                <span className="font-medium text-sm">{field.label}</span>
                                 <span className="text-xs text-gray-500 ml-2">
                                   {field.type} • Page {field.page}
                                   {field.required && ' • Required'}
@@ -2198,6 +1842,65 @@ Return ONLY valid JSON in this exact format:
             </div>
           )}
 
+          {/* Step: Publish Success */}
+          {step === 'publish' && (
+            <div className="max-w-md mx-auto text-center">
+              <div className="bg-white rounded-xl border border-gray-200 p-8">
+                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <CheckCircle className="w-8 h-8 text-green-600" />
+                </div>
+                <h2 className="text-2xl font-bold text-[#1A202C] mb-2">Form Published!</h2>
+                <p className="text-[#718096] mb-6">
+                  "{metadata.title}" has been successfully digitized and published.
+                </p>
+                <div className="space-y-3">
+                  <Link to="/forms">
+                    <Button variant="primary" className="w-full">
+                      <Eye className="w-4 h-4 mr-2" />
+                      View in Forms Library
+                    </Button>
+                  </Link>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => {
+                      setStep('upload');
+                      setPdfFile(null);
+                      setPdfPages([]);
+                      setFields([]);
+                      setIsMultiLangMode(false);
+                      setLanguageVariants(new Map());
+                      setSelectedLanguages(['en']);
+                      setMasterPageIndex(0);
+                      setMasterLanguage('en');
+                      setEditPreviewLanguage('en');
+                      setCategorySearch('');
+                      setShowCategoryDropdown(false);
+                      setFileLanguageAssignments(new Map());
+                      setMetadata({
+                        title: '',
+                        titleSi: '',
+                        titleTa: '',
+                        institution: '',
+                        category: '',
+                        description: '',
+                        postAddress: '',
+                        officeHours: '',
+                        telephoneNumbers: [''],
+                        faxNumber: '',
+                        email: '',
+                        website: '',
+                        officialLocation: '',
+                      });
+                    }}
+                  >
+                    <Plus className="w-4 h-4 mr-2" />
+                    Digitize Another Form
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -2214,7 +1917,7 @@ Return ONLY valid JSON in this exact format:
             }}
           >
             <div className="flex items-center justify-between mb-2">
-              <span className="font-medium text-sm text-gray-900 truncate">{field.labelEn}</span>
+              <span className="font-medium text-sm text-gray-900 truncate">{field.label}</span>
               <button
                 onClick={() => setShowFieldPopup(null)}
                 className="p-1 hover:bg-gray-100 rounded"
@@ -2345,182 +2048,6 @@ Return ONLY valid JSON in this exact format:
                 console.anthropic.com
               </a>
             </p>
-          </div>
-        </div>
-      )}
-
-      {/* Add Institution Modal */}
-      {showInstitutionModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-[#1A202C]">Add New Institution</h3>
-              <button
-                onClick={() => setShowInstitutionModal(false)}
-                className="p-1 hover:bg-gray-100 rounded"
-              >
-                <X className="w-5 h-5 text-gray-400" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Institution Name *
-                </label>
-                <input
-                  type="text"
-                  value={newInstitution.name}
-                  onChange={(e) => setNewInstitution({ ...newInstitution, name: e.target.value })}
-                  placeholder="e.g., Department of Immigration"
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Address
-                </label>
-                <textarea
-                  value={newInstitution.address}
-                  onChange={(e) => setNewInstitution({ ...newInstitution, address: e.target.value })}
-                  placeholder="Full postal address"
-                  rows={2}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Opening Hours
-                </label>
-                <input
-                  type="text"
-                  value={newInstitution.openingHours}
-                  onChange={(e) => setNewInstitution({ ...newInstitution, openingHours: e.target.value })}
-                  placeholder="e.g., Mon-Fri 8:30 AM - 4:30 PM"
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Telephone Numbers
-                </label>
-                {newInstitution.telephoneNumbers.map((phone, i) => (
-                  <div key={i} className="flex gap-2 mb-2">
-                    <input
-                      type="tel"
-                      value={phone}
-                      onChange={(e) => {
-                        const updated = [...newInstitution.telephoneNumbers];
-                        updated[i] = e.target.value;
-                        setNewInstitution({ ...newInstitution, telephoneNumbers: updated });
-                      }}
-                      placeholder="Phone number"
-                      className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                    />
-                    {i > 0 && (
-                      <button
-                        onClick={() => {
-                          const updated = newInstitution.telephoneNumbers.filter((_, idx) => idx !== i);
-                          setNewInstitution({ ...newInstitution, telephoneNumbers: updated });
-                        }}
-                        className="p-2 text-red-500 hover:bg-red-50 rounded"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                ))}
-                {newInstitution.telephoneNumbers.length < 5 && (
-                  <button
-                    onClick={() => setNewInstitution({
-                      ...newInstitution,
-                      telephoneNumbers: [...newInstitution.telephoneNumbers, '']
-                    })}
-                    className="text-sm text-[#3182CE] hover:underline"
-                  >
-                    + Add phone number
-                  </button>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Email
-                  </label>
-                  <input
-                    type="email"
-                    value={newInstitution.email}
-                    onChange={(e) => setNewInstitution({ ...newInstitution, email: e.target.value })}
-                    placeholder="contact@example.gov.lk"
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Website
-                  </label>
-                  <input
-                    type="url"
-                    value={newInstitution.website}
-                    onChange={(e) => setNewInstitution({ ...newInstitution, website: e.target.value })}
-                    placeholder="https://"
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="flex gap-3 mt-6">
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={() => setShowInstitutionModal(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                className="flex-1"
-                onClick={() => {
-                  if (!newInstitution.name.trim()) {
-                    setError('Institution name is required');
-                    return;
-                  }
-                  // Save institution
-                  const saved = addInstitution({
-                    name: newInstitution.name.trim(),
-                    address: newInstitution.address || undefined,
-                    openingHours: newInstitution.openingHours || undefined,
-                    telephoneNumbers: newInstitution.telephoneNumbers.filter(p => p.trim()),
-                    email: newInstitution.email || undefined,
-                    website: newInstitution.website || undefined,
-                  });
-                  // Update institutions list
-                  setAllInstitutions([...allInstitutions, saved]);
-                  // Auto-select the new institution
-                  setMetadata({
-                    ...metadata,
-                    institution: saved.name,
-                    institutionId: saved.id,
-                    postAddress: saved.address || metadata.postAddress,
-                    officeHours: saved.openingHours || metadata.officeHours,
-                    telephoneNumbers: saved.telephoneNumbers?.length ? saved.telephoneNumbers : metadata.telephoneNumbers,
-                    email: saved.email || metadata.email,
-                    website: saved.website || metadata.website,
-                  });
-                  setInstitutionSearch('');
-                  setShowInstitutionModal(false);
-                }}
-                disabled={!newInstitution.name.trim()}
-              >
-                <Plus className="w-4 h-4 mr-2" />
-                Add Institution
-              </Button>
-            </div>
           </div>
         </div>
       )}

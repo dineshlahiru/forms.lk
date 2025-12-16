@@ -51,8 +51,6 @@ export interface StoredForm extends Omit<Form, 'pdfUrl' | 'previewUrl'> {
   // Multi-language support
   languageVariants?: StoredLanguageVariant[];
   defaultLanguage?: Language;
-  // Single PDF containing all languages
-  allLanguagesInOne?: boolean;
 }
 
 // Field position for PDF overlay mapping
@@ -266,10 +264,6 @@ export function formMatchesSearch(
   query: string
 ): boolean {
   const lowerQuery = query.toLowerCase();
-
-  // Search in section and form number (government identifiers)
-  if (form.section?.toLowerCase().includes(lowerQuery)) return true;
-  if (form.formNumber?.toLowerCase().includes(lowerQuery)) return true;
 
   // Search in all title fields
   if (form.title.toLowerCase().includes(lowerQuery)) return true;

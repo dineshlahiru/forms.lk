@@ -1,11 +1,11 @@
-import { useState, useMemo, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, useMemo, useCallback, useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { useUploadQueue } from '../context/UploadQueueContext';
 import {
   LayoutDashboard,
   FileText,
   Users,
   Download,
-  Star,
   Check,
   Shield,
   Award,
@@ -29,48 +29,32 @@ import {
   Building2,
   FolderOpen,
   Upload,
+  Loader2,
+  HardDrive,
+  Database,
+  Save,
+  UploadCloud,
 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/ui/Button';
-import { sampleForms } from '../data/sampleForms';
-import { CATEGORIES } from '../types';
-import type { Form } from '../types';
-import { getCustomForms, deleteForm as deleteStoredForm, updateVerificationLevel, approveForm, getPhoneNumbers, type StoredForm } from '../utils/formsStorage';
-
-// Storage key for sample form title overrides
-const TITLE_OVERRIDES_KEY = 'forms-lk-title-overrides';
-
-// Storage key for form visibility
-const VISIBILITY_KEY = 'forms-lk-form-visibility';
-
-// Get all title overrides
-function getTitleOverrides(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(TITLE_OVERRIDES_KEY) || '{}');
-  } catch {
-    return {};
-  }
-}
-
-// Get form visibility states
-function getFormVisibility(): Record<string, boolean> {
-  try {
-    return JSON.parse(localStorage.getItem(VISIBILITY_KEY) || '{}');
-  } catch {
-    return {};
-  }
-}
-
-// Set form visibility
-function setFormVisibility(formId: string, visible: boolean): void {
-  try {
-    const visibility = getFormVisibility();
-    visibility[formId] = visible;
-    localStorage.setItem(VISIBILITY_KEY, JSON.stringify(visibility));
-  } catch {
-    console.error('Failed to save form visibility');
-  }
-}
+import { useAllForms, useCategories, useInstitutions } from '../hooks';
+import {
+  updateForm,
+  updateFormStatus,
+  deleteForm as deleteFormService,
+  getFormLocalizedTitle,
+  getCategoryLocalizedName,
+  getInstitutionLocalizedName,
+  updateInstitution as updateInstitutionService,
+  deleteInstitution as deleteInstitutionService,
+  isLocalStorage,
+  downloadBackup,
+  restoreFullBackup,
+  getBackupStats,
+  syncToFirebase,
+  type SyncProgress,
+} from '../services';
+import type { FirebaseForm, FirebaseCategory, FirebaseInstitution } from '../types/firebase';
 
 type SortField = 'title' | 'downloads' | 'rating' | 'updatedAt' | 'createdAt' | 'verificationLevel';
 type SortOrder = 'asc' | 'desc';
@@ -84,44 +68,37 @@ const verificationLabels = {
   3: { label: 'Official', color: 'amber' as const, icon: Award },
 };
 
-// Convert StoredForm to Form type
-function convertStoredToForm(stored: StoredForm): Form {
-  // Convert pdfPages (base64 strings) to FormPage objects
-  const pages = (stored.pdfPages || []).map((_, index) => ({
-    id: `page-${index + 1}`,
-    elements: [] as import('../types').FormElement[],
-  }));
+type AdminTab = 'forms' | 'uploads';
 
-  // Use helper to get phone numbers (handles both new array and legacy comma-separated format)
-  const phoneNumbers = getPhoneNumbers(stored.contactInfo);
-
-  return {
-    id: stored.id,
-    title: stored.title,
-    institution: stored.institution,
-    category: stored.category,
-    description: stored.description || '',
-    pages: pages,
-    downloads: stored.downloads || 0,
-    rating: stored.rating || 0,
-    ratingCount: stored.ratingCount || 0,
-    verificationLevel: (stored.verificationLevel || 0) as 0 | 1 | 2 | 3,
-    status: stored.status || 'published',
-    createdAt: stored.createdAt || new Date().toISOString(),
-    updatedAt: stored.updatedAt || new Date().toISOString(),
-    createdBy: 'admin',
-    postAddress: stored.contactInfo?.address,
-    officeHours: stored.contactInfo?.officeHours,
-    telephoneNumbers: phoneNumbers.length > 0 ? phoneNumbers : undefined,
-    faxNumber: stored.contactInfo?.faxNumber,
-    email: stored.contactInfo?.email,
-    website: stored.contactInfo?.website,
-    officialLocation: stored.contactInfo?.officialLocation,
-    thumbnail: stored.pdfPages?.[0],
-  };
+// Helper to safely convert timestamps (Firebase Timestamp or ISO string)
+function toDate(timestamp: unknown): Date {
+  if (!timestamp) return new Date();
+  if (typeof timestamp === 'string') return new Date(timestamp);
+  if (typeof timestamp === 'object' && 'toDate' in timestamp && typeof (timestamp as { toDate: () => Date }).toDate === 'function') {
+    return (timestamp as { toDate: () => Date }).toDate();
+  }
+  return new Date();
 }
 
 export function AdminPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<AdminTab>(() => {
+    const tab = searchParams.get('tab');
+    return tab === 'uploads' ? 'uploads' : 'forms';
+  });
+
+  // Update URL when tab changes
+  useEffect(() => {
+    if (activeTab === 'uploads') {
+      setSearchParams({ tab: 'uploads' });
+    } else {
+      setSearchParams({});
+    }
+  }, [activeTab, setSearchParams]);
+
+  // Upload queue
+  const { pendingUploads, currentUpload, retryUpload, cancelUpload, refreshQueue } = useUploadQueue();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [selectedStatus, setSelectedStatus] = useState<StatusFilter>('all');
@@ -132,123 +109,284 @@ export function AdminPage() {
   const [selectedForms, setSelectedForms] = useState<Set<string>>(new Set());
   const [showFilters, setShowFilters] = useState(true);
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
-  const [customForms, setCustomForms] = useState<Form[]>([]);
   const [showVerificationModal, setShowVerificationModal] = useState<string | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [formVisibilityState, setFormVisibilityState] = useState<Record<string, boolean>>({});
 
-  // Reset filters on component mount
+  // Institutions state
+  const [showInstitutionsPanel, setShowInstitutionsPanel] = useState(false);
+  const [editingInstitution, setEditingInstitution] = useState<FirebaseInstitution | null>(null);
+  const [institutionFormData, setInstitutionFormData] = useState({
+    name: '',
+    address: '',
+    openingHours: '',
+    telephoneNumbers: [''],
+    email: '',
+    website: '',
+  });
+  const [showDeleteInstitutionModal, setShowDeleteInstitutionModal] = useState<string | null>(null);
+
+  // Backup state (only for local mode)
+  const [showBackupPanel, setShowBackupPanel] = useState(false);
+  const [backupStats, setBackupStats] = useState<{ databaseSizeKB: number; fileCount: number; totalFileSizeKB: number } | null>(null);
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const [backupMessage, setBackupMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Sync to Firebase state
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+
+  // Firebase hooks
+  const { data: forms, loading: formsLoading, error: formsError, refetch: refetchForms } = useAllForms();
+  const { data: categories, loading: categoriesLoading } = useCategories();
+  const { data: institutions, loading: institutionsLoading, refetch: refetchInstitutions } = useInstitutions();
+
+  // Load backup stats when panel opens
   useEffect(() => {
-    setSearchQuery('');
-    setSelectedCategory('All');
-    setSelectedStatus('all');
-    setSelectedVerification('all');
-    setSortField('downloads');
-    setSortOrder('desc');
-    // Load visibility state
-    setFormVisibilityState(getFormVisibility());
+    if (showBackupPanel && isLocalStorage()) {
+      getBackupStats().then(setBackupStats).catch(console.error);
+    }
+  }, [showBackupPanel]);
+
+  // Handle download backup
+  const handleDownloadBackup = useCallback(async () => {
+    setBackupLoading(true);
+    setBackupMessage(null);
+    try {
+      await downloadBackup();
+      setBackupMessage({ type: 'success', text: 'Backup downloaded successfully!' });
+      // Refresh stats after backup
+      const stats = await getBackupStats();
+      setBackupStats(stats);
+    } catch (error) {
+      console.error('Backup failed:', error);
+      setBackupMessage({ type: 'error', text: 'Failed to create backup' });
+    } finally {
+      setBackupLoading(false);
+    }
   }, []);
 
-  // Load custom forms from localStorage
-  useEffect(() => {
-    const stored = getCustomForms();
-    setCustomForms(stored.map(convertStoredToForm));
-  }, [refreshKey]);
+  // Handle restore backup
+  const handleRestoreBackup = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  // Combine all forms, applying any title overrides for sample forms
-  const allForms = useMemo(() => {
-    const titleOverrides = getTitleOverrides();
-    const sampleFormsWithOverrides = sampleForms.map(form => {
-      const override = titleOverrides[form.id];
-      return override ? { ...form, title: override } : form;
+    setRestoreLoading(true);
+    setBackupMessage(null);
+    try {
+      const result = await restoreFullBackup(file);
+      if (result.success) {
+        setBackupMessage({ type: 'success', text: result.message });
+        // Refresh data after restore
+        await refetchForms();
+        await refetchInstitutions();
+        const stats = await getBackupStats();
+        setBackupStats(stats);
+      } else {
+        setBackupMessage({ type: 'error', text: result.message });
+      }
+    } catch (error) {
+      console.error('Restore failed:', error);
+      setBackupMessage({ type: 'error', text: 'Failed to restore backup' });
+    } finally {
+      setRestoreLoading(false);
+      // Reset file input
+      e.target.value = '';
+    }
+  }, [refetchForms, refetchInstitutions]);
+
+  // Handle sync to Firebase
+  const handleSyncToFirebase = useCallback(async () => {
+    setSyncLoading(true);
+    setSyncProgress(null);
+    setBackupMessage(null);
+    try {
+      const result = await syncToFirebase((progress) => {
+        setSyncProgress({ ...progress });
+      });
+      if (result.success) {
+        setBackupMessage({ type: 'success', text: result.message });
+      } else {
+        setBackupMessage({ type: 'error', text: result.message });
+      }
+    } catch (error) {
+      console.error('Sync failed:', error);
+      setBackupMessage({ type: 'error', text: 'Failed to sync to Firebase' });
+    } finally {
+      setSyncLoading(false);
+      setSyncProgress(null);
+    }
+  }, []);
+
+  // Create lookup maps
+  const categoryMap = useMemo(() => {
+    if (!categories) return new Map<string, FirebaseCategory>();
+    return new Map(categories.map(cat => [cat.id, cat]));
+  }, [categories]);
+
+  const institutionMap = useMemo(() => {
+    if (!institutions) return new Map<string, FirebaseInstitution>();
+    return new Map(institutions.map(inst => [inst.id, inst]));
+  }, [institutions]);
+
+  // Handle edit institution
+  const handleEditInstitution = useCallback((institution: FirebaseInstitution) => {
+    setEditingInstitution(institution);
+    setInstitutionFormData({
+      name: institution.name,
+      address: institution.address || '',
+      openingHours: institution.officeHours || '',
+      telephoneNumbers: institution.telephoneNumbers?.length ? [...institution.telephoneNumbers] : [''],
+      email: institution.email || '',
+      website: institution.website || '',
     });
-    return [...customForms, ...sampleFormsWithOverrides];
-  }, [customForms]);
+  }, []);
 
-  // Check if form is custom (editable)
-  const isCustomForm = (formId: string) => {
-    return formId.startsWith('custom-');
-  };
+  // Handle save institution
+  const handleSaveInstitution = useCallback(async () => {
+    if (!editingInstitution || !institutionFormData.name.trim()) return;
+
+    try {
+      await updateInstitutionService(editingInstitution.id, {
+        name: institutionFormData.name.trim(),
+        address: institutionFormData.address || undefined,
+        officeHours: institutionFormData.openingHours || undefined,
+        telephoneNumbers: institutionFormData.telephoneNumbers.filter(p => p.trim()),
+        email: institutionFormData.email || undefined,
+        website: institutionFormData.website || undefined,
+      });
+      await refetchInstitutions();
+      setEditingInstitution(null);
+      setInstitutionFormData({
+        name: '',
+        address: '',
+        openingHours: '',
+        telephoneNumbers: [''],
+        email: '',
+        website: '',
+      });
+    } catch (error) {
+      console.error('Failed to save institution:', error);
+      alert('Failed to save institution');
+    }
+  }, [editingInstitution, institutionFormData, refetchInstitutions]);
+
+  // Handle delete institution
+  const confirmDeleteInstitution = useCallback(async () => {
+    if (!showDeleteInstitutionModal) return;
+
+    try {
+      await deleteInstitutionService(showDeleteInstitutionModal);
+      await refetchInstitutions();
+      setShowDeleteInstitutionModal(null);
+    } catch (error) {
+      console.error('Failed to delete institution:', error);
+      alert('Failed to delete institution');
+    }
+  }, [showDeleteInstitutionModal, refetchInstitutions]);
 
   // Handle approve form
-  const handleApproveForm = (formId: string) => {
-    if (isCustomForm(formId)) {
-      approveForm(formId);
-      setRefreshKey(k => k + 1);
+  const handleApproveForm = useCallback(async (formId: string) => {
+    try {
+      await updateFormStatus(formId, 'published');
+      await refetchForms();
+    } catch (error) {
+      console.error('Failed to approve form:', error);
     }
     setActiveDropdown(null);
-  };
+  }, [refetchForms]);
 
   // Handle change verification
-  const handleChangeVerification = (formId: string, level: 0 | 1 | 2 | 3) => {
-    if (isCustomForm(formId)) {
-      updateVerificationLevel(formId, level);
-      setRefreshKey(k => k + 1);
+  const handleChangeVerification = useCallback(async (formId: string, level: 0 | 1 | 2 | 3) => {
+    try {
+      await updateForm(formId, { verificationLevel: level });
+      await refetchForms();
+    } catch (error) {
+      console.error('Failed to change verification:', error);
     }
     setShowVerificationModal(null);
     setActiveDropdown(null);
-  };
+  }, [refetchForms]);
 
   // Handle toggle visibility
-  const handleToggleVisibility = (formId: string) => {
-    const currentVisibility = formVisibilityState[formId] !== false;
-    setFormVisibility(formId, !currentVisibility);
-    setFormVisibilityState(prev => ({ ...prev, [formId]: !currentVisibility }));
-  };
+  const handleToggleVisibility = useCallback(async (form: FirebaseForm) => {
+    try {
+      const newStatus = form.status === 'published' ? 'draft' : 'published';
+      await updateFormStatus(form.id, newStatus);
+      await refetchForms();
+    } catch (error) {
+      console.error('Failed to toggle visibility:', error);
+    }
+  }, [refetchForms]);
 
-  // Handle delete form - show confirmation modal
-  const handleDeleteForm = (formId: string) => {
+  // Handle delete form
+  const handleDeleteForm = useCallback((formId: string) => {
     setShowDeleteModal(formId);
     setActiveDropdown(null);
-  };
+  }, []);
 
   // Confirm delete
-  const confirmDelete = () => {
-    if (showDeleteModal) {
-      deleteStoredForm(showDeleteModal);
-      setRefreshKey(k => k + 1);
+  const confirmDelete = useCallback(async () => {
+    if (!showDeleteModal) return;
+
+    try {
+      await deleteFormService(showDeleteModal);
+      await refetchForms();
       setShowDeleteModal(null);
+    } catch (error) {
+      console.error('Failed to delete form:', error);
+      alert('Failed to delete form');
     }
-  };
+  }, [showDeleteModal, refetchForms]);
 
   // Calculate stats
   const stats = useMemo(() => {
-    const totalForms = allForms.length;
-    const totalDownloads = allForms.reduce((sum, f) => sum + f.downloads, 0);
-    const avgRating = totalForms > 0 ? allForms.reduce((sum, f) => sum + f.rating, 0) / totalForms : 0;
-    const publishedForms = allForms.filter(f => f.status === 'published').length;
-    const pendingReview = allForms.filter(f => f.verificationLevel === 0).length;
-    const officialForms = allForms.filter(f => f.verificationLevel === 3).length;
+    if (!forms) return {
+      totalForms: 0,
+      totalDownloads: 0,
+      avgRating: 0,
+      publishedForms: 0,
+      pendingReview: 0,
+      officialForms: 0,
+      byCategory: {} as Record<string, number>,
+      byInstitution: {} as Record<string, number>,
+    };
+
+    const totalForms = forms.length;
+    const totalDownloads = forms.reduce((sum, f) => sum + f.downloadCount, 0);
+    const publishedForms = forms.filter(f => f.status === 'published').length;
+    const pendingReview = forms.filter(f => f.verificationLevel === 0).length;
+    const officialForms = forms.filter(f => f.verificationLevel === 3).length;
 
     // Category breakdown
-    const byCategory = CATEGORIES.reduce((acc, cat) => {
-      acc[cat] = allForms.filter(f => f.category === cat).length;
+    const byCategory = forms.reduce((acc, f) => {
+      acc[f.categoryId] = (acc[f.categoryId] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
 
     // Institution breakdown
-    const byInstitution = allForms.reduce((acc, f) => {
-      acc[f.institution] = (acc[f.institution] || 0) + 1;
+    const byInstitution = forms.reduce((acc, f) => {
+      acc[f.institutionId] = (acc[f.institutionId] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
 
     return {
       totalForms,
       totalDownloads,
-      avgRating,
+      avgRating: 0,
       publishedForms,
       pendingReview,
       officialForms,
       byCategory,
       byInstitution,
-      customForms: customForms.length,
     };
-  }, [allForms, customForms]);
+  }, [forms]);
 
   // Filter and sort forms
   const filteredForms = useMemo(() => {
-    let result = [...allForms];
+    if (!forms) return [];
+
+    let result = [...forms];
 
     // Search filter
     if (searchQuery) {
@@ -256,14 +394,14 @@ export function AdminPage() {
       result = result.filter(
         f =>
           f.title.toLowerCase().includes(query) ||
-          f.institution.toLowerCase().includes(query) ||
-          f.description.toLowerCase().includes(query)
+          f.institutionId.toLowerCase().includes(query) ||
+          (f.description && f.description.toLowerCase().includes(query))
       );
     }
 
     // Category filter
     if (selectedCategory !== 'All') {
-      result = result.filter(f => f.category === selectedCategory);
+      result = result.filter(f => f.categoryId === selectedCategory);
     }
 
     // Status filter
@@ -284,16 +422,13 @@ export function AdminPage() {
           comparison = a.title.localeCompare(b.title);
           break;
         case 'downloads':
-          comparison = a.downloads - b.downloads;
-          break;
-        case 'rating':
-          comparison = a.rating - b.rating;
+          comparison = a.downloadCount - b.downloadCount;
           break;
         case 'updatedAt':
-          comparison = new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+          comparison = a.updatedAt.toMillis() - b.updatedAt.toMillis();
           break;
         case 'createdAt':
-          comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+          comparison = a.createdAt.toMillis() - b.createdAt.toMillis();
           break;
         case 'verificationLevel':
           comparison = a.verificationLevel - b.verificationLevel;
@@ -303,7 +438,7 @@ export function AdminPage() {
     });
 
     return result;
-  }, [searchQuery, selectedCategory, selectedStatus, selectedVerification, sortField, sortOrder]);
+  }, [forms, searchQuery, selectedCategory, selectedStatus, selectedVerification, sortField, sortOrder]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -332,11 +467,6 @@ export function AdminPage() {
     }
   };
 
-  const handleBulkAction = (action: string) => {
-    alert(`${action} action on ${selectedForms.size} forms`);
-    setSelectedForms(new Set());
-  };
-
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null;
     return sortOrder === 'asc' ? (
@@ -363,8 +493,7 @@ export function AdminPage() {
     );
   };
 
-  const FormActions = ({ form }: { form: Form }) => {
-    const editable = isCustomForm(form.id);
+  const FormActions = ({ form }: { form: FirebaseForm }) => {
     return (
       <div className="relative">
         <button
@@ -383,50 +512,64 @@ export function AdminPage() {
               <Eye className="w-4 h-4" />
               View Details
             </Link>
-            {editable && (
-              <>
-                <Link
-                  to={`/admin/digitizer?edit=${form.id}`}
-                  className="flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  onClick={() => setActiveDropdown(null)}
-                >
-                  <Edit3 className="w-4 h-4" />
-                  Edit Form
-                </Link>
-                <button
-                  onClick={() => handleApproveForm(form.id)}
-                  className="w-full flex items-center gap-2 px-4 py-2 text-sm text-green-600 hover:bg-green-50"
-                >
-                  <CheckCircle className="w-4 h-4" />
-                  Approve
-                </button>
-                <button
-                  onClick={() => setShowVerificationModal(form.id)}
-                  className="w-full flex items-center gap-2 px-4 py-2 text-sm text-amber-600 hover:bg-amber-50"
-                >
-                  <Shield className="w-4 h-4" />
-                  Change Verification
-                </button>
-                <hr className="my-1" />
-                <button
-                  onClick={() => handleDeleteForm(form.id)}
-                  className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Delete
-                </button>
-              </>
-            )}
-            {!editable && (
-              <div className="px-4 py-2 text-xs text-gray-400 italic">
-                Sample forms are read-only
-              </div>
-            )}
+            <Link
+              to={`/admin/digitizer?edit=${form.id}`}
+              className="flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              onClick={() => setActiveDropdown(null)}
+            >
+              <Edit3 className="w-4 h-4" />
+              Edit Form
+            </Link>
+            <button
+              onClick={() => handleApproveForm(form.id)}
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-green-600 hover:bg-green-50"
+            >
+              <CheckCircle className="w-4 h-4" />
+              Approve
+            </button>
+            <button
+              onClick={() => setShowVerificationModal(form.id)}
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-amber-600 hover:bg-amber-50"
+            >
+              <Shield className="w-4 h-4" />
+              Change Verification
+            </button>
+            <hr className="my-1" />
+            <button
+              onClick={() => handleDeleteForm(form.id)}
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+            >
+              <Trash2 className="w-4 h-4" />
+              Delete
+            </button>
           </div>
         )}
       </div>
     );
   };
+
+  // Loading state
+  if (formsLoading || categoriesLoading) {
+    return (
+      <Layout>
+        <div className="min-h-screen flex items-center justify-center">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+        </div>
+      </Layout>
+    );
+  }
+
+  // Error state
+  if (formsError) {
+    return (
+      <Layout>
+        <div className="max-w-7xl mx-auto px-4 py-16 text-center">
+          <h1 className="text-2xl font-bold text-red-600 mb-4">Error Loading Data</h1>
+          <p className="text-gray-600">{formsError.message}</p>
+        </div>
+      </Layout>
+    );
+  }
 
   return (
     <Layout>
@@ -445,14 +588,24 @@ export function AdminPage() {
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <Button variant="outline" size="sm" className="border-white/30 text-white hover:bg-white/10">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-white/30 text-white hover:bg-white/10"
+                  onClick={() => {
+                    refetchForms();
+                    refetchInstitutions();
+                  }}
+                >
                   <RefreshCw className="w-4 h-4 mr-2" />
-                  Sync Data
+                  Refresh
                 </Button>
-                <Button variant="outline" size="sm" className="border-white/30 text-white hover:bg-white/10">
-                  <Settings className="w-4 h-4 mr-2" />
-                  Settings
-                </Button>
+                <Link to="/setup">
+                  <Button variant="outline" size="sm" className="border-white/30 text-white hover:bg-white/10">
+                    <Settings className="w-4 h-4 mr-2" />
+                    Setup
+                  </Button>
+                </Link>
               </div>
             </div>
           </div>
@@ -480,17 +633,6 @@ export function AdminPage() {
                 <div>
                   <p className="text-2xl font-bold text-[#1A202C]">{(stats.totalDownloads / 1000).toFixed(1)}k</p>
                   <p className="text-xs text-[#718096]">Downloads</p>
-                </div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl border border-gray-200 p-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
-                  <Star className="w-5 h-5 text-amber-600" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-[#1A202C]">{stats.avgRating.toFixed(1)}</p>
-                  <p className="text-xs text-[#718096]">Avg Rating</p>
                 </div>
               </div>
             </div>
@@ -527,11 +669,162 @@ export function AdminPage() {
                 </div>
               </div>
             </div>
+            <div className="bg-white rounded-xl border border-gray-200 p-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+                  <Building2 className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-[#1A202C]">{institutions?.length || 0}</p>
+                  <p className="text-xs text-[#718096]">Institutions</p>
+                </div>
+              </div>
+            </div>
           </div>
 
-          {/* Main Content Grid */}
+          {/* Tab Navigation */}
+          <div className="flex gap-1 mb-6 bg-white rounded-lg border border-gray-200 p-1 w-fit">
+            <button
+              onClick={() => setActiveTab('forms')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === 'forms'
+                  ? 'bg-[#1A365D] text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              Forms Management
+            </button>
+            <button
+              onClick={() => setActiveTab('uploads')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === 'uploads'
+                  ? 'bg-[#1A365D] text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <Upload className="w-4 h-4" />
+              Pending Uploads
+              {pendingUploads.length > 0 && (
+                <span className={`ml-1 px-2 py-0.5 rounded-full text-xs ${
+                  activeTab === 'uploads' ? 'bg-white/20 text-white' : 'bg-orange-100 text-orange-600'
+                }`}>
+                  {pendingUploads.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Pending Uploads Tab */}
+          {activeTab === 'uploads' && (
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-semibold text-[#1A202C]">Pending Uploads</h2>
+                <Button variant="outline" size="sm" onClick={refreshQueue}>
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Refresh
+                </Button>
+              </div>
+
+              {/* Current Upload Progress */}
+              {currentUpload && currentUpload.state !== 'completed' && (
+                <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center gap-3 mb-3">
+                    <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+                    <span className="font-medium text-blue-800">
+                      {currentUpload.currentStep}
+                    </span>
+                  </div>
+                  <div className="w-full bg-blue-100 rounded-full h-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${currentUpload.progress}%` }}
+                    />
+                  </div>
+                  <p className="text-sm text-blue-600 mt-2">
+                    {Math.round(currentUpload.progress)}% complete
+                  </p>
+                </div>
+              )}
+
+              {/* Pending Uploads List */}
+              {pendingUploads.length === 0 ? (
+                <div className="text-center py-12">
+                  <Upload className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                  <p className="text-gray-500">No pending uploads</p>
+                  <Link to="/admin/digitizer" className="mt-4 inline-block">
+                    <Button variant="primary" size="sm">
+                      Digitize New Form
+                    </Button>
+                  </Link>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {pendingUploads.map((form) => form && (
+                    <div
+                      key={form.id}
+                      className={`p-4 rounded-lg border ${
+                        form.uploadStatus === 'error'
+                          ? 'bg-red-50 border-red-200'
+                          : form.uploadStatus === 'uploading'
+                          ? 'bg-blue-50 border-blue-200'
+                          : 'bg-gray-50 border-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <h3 className="font-medium text-gray-900">{form.title || 'Untitled Form'}</h3>
+                          <p className="text-sm text-gray-500 mt-1">
+                            Created: {form.createdAt ? new Date(form.createdAt).toLocaleString() : 'Unknown'}
+                          </p>
+                          {form.uploadStatus === 'error' && form.uploadError && (
+                            <p className="text-sm text-red-600 mt-2 flex items-center gap-1">
+                              <AlertTriangle className="w-4 h-4" />
+                              {form.uploadError}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {form.uploadStatus === 'error' && (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              onClick={() => retryUpload(form.id)}
+                            >
+                              <RefreshCw className="w-4 h-4 mr-1" />
+                              Retry
+                            </Button>
+                          )}
+                          {form.uploadStatus === 'uploading' && (
+                            <span className="flex items-center gap-2 text-sm text-blue-600">
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Uploading...
+                            </span>
+                          )}
+                          {form.uploadStatus === 'pending' && (
+                            <span className="text-sm text-gray-500">Queued</span>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => cancelUpload(form.id)}
+                            className="text-red-600 hover:bg-red-50"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Forms Management Tab */}
+          {activeTab === 'forms' && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-            {/* Sidebar - Category & Institution Stats */}
+            {/* Sidebar */}
             <div className="lg:col-span-1 space-y-6">
               {/* Quick Actions */}
               <div className="bg-white rounded-xl border border-gray-200 p-4">
@@ -552,6 +845,16 @@ export function AdminPage() {
                       Create New Form
                     </Button>
                   </Link>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className={`w-full justify-start ${showInstitutionsPanel ? 'bg-blue-50 border-blue-200 text-blue-700' : ''}`}
+                    onClick={() => setShowInstitutionsPanel(!showInstitutionsPanel)}
+                  >
+                    <Building2 className="w-4 h-4 mr-2" />
+                    Institutions
+                    <span className="ml-auto bg-gray-100 px-1.5 py-0.5 rounded text-xs">{institutions?.length || 0}</span>
+                  </Button>
                   <Button variant="outline" size="sm" className="w-full justify-start">
                     <Users className="w-4 h-4 mr-2" />
                     Manage Users
@@ -560,8 +863,200 @@ export function AdminPage() {
                     <BarChart3 className="w-4 h-4 mr-2" />
                     View Analytics
                   </Button>
+                  {isLocalStorage() && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className={`w-full justify-start ${showBackupPanel ? 'bg-green-50 border-green-200 text-green-700' : ''}`}
+                      onClick={() => setShowBackupPanel(!showBackupPanel)}
+                    >
+                      <HardDrive className="w-4 h-4 mr-2" />
+                      Data & Backup
+                    </Button>
+                  )}
                 </div>
               </div>
+
+              {/* Data & Backup Panel (Local Mode Only) */}
+              {isLocalStorage() && showBackupPanel && (
+                <div className="bg-white rounded-xl border border-gray-200 p-4">
+                  <h3 className="font-semibold text-[#1A202C] mb-4 flex items-center gap-2">
+                    <Database className="w-4 h-4" />
+                    Data & Backup
+                  </h3>
+
+                  {/* Storage Stats */}
+                  {backupStats && (
+                    <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                      <div className="text-xs text-gray-500 mb-2">Storage Usage</div>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div>
+                          <span className="text-gray-600">Database:</span>
+                          <span className="ml-1 font-medium">{backupStats.databaseSizeKB} KB</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600">Files:</span>
+                          <span className="ml-1 font-medium">{backupStats.fileCount}</span>
+                        </div>
+                        <div className="col-span-2">
+                          <span className="text-gray-600">Total Files Size:</span>
+                          <span className="ml-1 font-medium">{backupStats.totalFileSizeKB} KB</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Message */}
+                  {backupMessage && (
+                    <div className={`mb-4 p-3 rounded-lg text-sm ${
+                      backupMessage.type === 'success'
+                        ? 'bg-green-50 text-green-700 border border-green-200'
+                        : 'bg-red-50 text-red-700 border border-red-200'
+                    }`}>
+                      {backupMessage.text}
+                    </div>
+                  )}
+
+                  {/* Backup Actions */}
+                  <div className="space-y-2">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      className="w-full justify-center bg-green-600 hover:bg-green-700"
+                      onClick={handleDownloadBackup}
+                      disabled={backupLoading}
+                    >
+                      {backupLoading ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Save className="w-4 h-4 mr-2" />
+                      )}
+                      Download Backup
+                    </Button>
+
+                    <div className="relative">
+                      <input
+                        type="file"
+                        accept=".json"
+                        onChange={handleRestoreBackup}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        disabled={restoreLoading}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full justify-center"
+                        disabled={restoreLoading}
+                      >
+                        {restoreLoading ? (
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        ) : (
+                          <UploadCloud className="w-4 h-4 mr-2" />
+                        )}
+                        Restore Backup
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Sync to Firebase */}
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <h4 className="text-sm font-medium text-gray-700 mb-2">Sync to Firebase</h4>
+
+                    {syncProgress && (
+                      <div className="mb-3 p-2 bg-blue-50 rounded-lg text-xs">
+                        <div className="flex justify-between text-blue-700 mb-1">
+                          <span className="capitalize">{syncProgress.phase}</span>
+                          <span>{syncProgress.current}/{syncProgress.total}</span>
+                        </div>
+                        <div className="w-full bg-blue-100 rounded-full h-1.5">
+                          <div
+                            className="bg-blue-600 h-1.5 rounded-full transition-all"
+                            style={{ width: syncProgress.total > 0 ? `${(syncProgress.current / syncProgress.total) * 100}%` : '0%' }}
+                          />
+                        </div>
+                        <p className="text-blue-600 mt-1 truncate">{syncProgress.currentItem}</p>
+                      </div>
+                    )}
+
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      className="w-full justify-center bg-orange-500 hover:bg-orange-600"
+                      onClick={handleSyncToFirebase}
+                      disabled={syncLoading}
+                    >
+                      {syncLoading ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <UploadCloud className="w-4 h-4 mr-2" />
+                      )}
+                      Push to Firebase
+                    </Button>
+                    <p className="mt-2 text-xs text-gray-500">
+                      Upload all local data to Firebase cloud.
+                    </p>
+                  </div>
+
+                  <p className="mt-3 text-xs text-gray-500">
+                    Backup includes database and all PDF files. Restore will replace all current data.
+                  </p>
+                </div>
+              )}
+
+              {/* Institutions Panel */}
+              {showInstitutionsPanel && (
+                <div className="bg-white rounded-xl border border-gray-200 p-4">
+                  <h3 className="font-semibold text-[#1A202C] mb-4 flex items-center gap-2">
+                    <Building2 className="w-4 h-4" />
+                    Manage Institutions
+                  </h3>
+                  {institutionsLoading ? (
+                    <div className="flex justify-center py-4">
+                      <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+                    </div>
+                  ) : !institutions || institutions.length === 0 ? (
+                    <p className="text-sm text-gray-500 text-center py-4">
+                      No institutions found. Visit Setup to seed data.
+                    </p>
+                  ) : (
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {institutions.map((inst) => (
+                        <div
+                          key={inst.id}
+                          className="p-3 border border-gray-100 rounded-lg hover:bg-gray-50"
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1 min-w-0">
+                              <h4 className="font-medium text-sm text-gray-900 truncate">
+                                {getInstitutionLocalizedName(inst, 'en')}
+                              </h4>
+                              {inst.address && (
+                                <p className="text-xs text-gray-500 mt-0.5 truncate">{inst.address}</p>
+                              )}
+                            </div>
+                            <div className="flex gap-1 ml-2">
+                              <button
+                                onClick={() => handleEditInstitution(inst)}
+                                className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
+                                title="Edit"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => setShowDeleteInstitutionModal(inst.id)}
+                                className="p-1.5 text-red-500 hover:bg-red-50 rounded"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Category Breakdown */}
               <div className="bg-white rounded-xl border border-gray-200 p-4">
@@ -570,48 +1065,22 @@ export function AdminPage() {
                   By Category
                 </h3>
                 <div className="space-y-2">
-                  {Object.entries(stats.byCategory)
-                    .filter(([, count]) => count > 0)
-                    .sort(([, a], [, b]) => b - a)
-                    .map(([category, count]) => (
-                      <button
-                        key={category}
-                        onClick={() => setSelectedCategory(category)}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors ${
-                          selectedCategory === category
-                            ? 'bg-blue-50 text-blue-700'
-                            : 'hover:bg-gray-50 text-gray-700'
-                        }`}
-                      >
-                        <span className="truncate">{category}</span>
-                        <span className="bg-gray-100 px-2 py-0.5 rounded-full text-xs font-medium">
-                          {count}
-                        </span>
-                      </button>
-                    ))}
-                </div>
-              </div>
-
-              {/* Institution Breakdown */}
-              <div className="bg-white rounded-xl border border-gray-200 p-4">
-                <h3 className="font-semibold text-[#1A202C] mb-4 flex items-center gap-2">
-                  <Building2 className="w-4 h-4" />
-                  By Institution
-                </h3>
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {Object.entries(stats.byInstitution)
-                    .sort(([, a], [, b]) => b - a)
-                    .map(([institution, count]) => (
-                      <div
-                        key={institution}
-                        className="flex items-center justify-between px-3 py-2 rounded-lg text-sm hover:bg-gray-50"
-                      >
-                        <span className="truncate text-gray-700">{institution}</span>
-                        <span className="bg-gray-100 px-2 py-0.5 rounded-full text-xs font-medium">
-                          {count}
-                        </span>
-                      </div>
-                    ))}
+                  {categories?.filter(cat => cat.isActive).map((cat) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => setSelectedCategory(cat.id)}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors ${
+                        selectedCategory === cat.id
+                          ? 'bg-blue-50 text-blue-700'
+                          : 'hover:bg-gray-50 text-gray-700'
+                      }`}
+                    >
+                      <span className="truncate">{getCategoryLocalizedName(cat, 'en')}</span>
+                      <span className="bg-gray-100 px-2 py-0.5 rounded-full text-xs font-medium">
+                        {stats.byCategory[cat.id] || 0}
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>
@@ -674,8 +1143,8 @@ export function AdminPage() {
                         className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
                       >
                         <option value="All">All Categories</option>
-                        {CATEGORIES.map((cat) => (
-                          <option key={cat} value={cat}>{cat}</option>
+                        {categories?.map((cat) => (
+                          <option key={cat.id} value={cat.id}>{getCategoryLocalizedName(cat, 'en')}</option>
                         ))}
                       </select>
                     </div>
@@ -725,8 +1194,6 @@ export function AdminPage() {
                       >
                         <option value="downloads-desc">Most Downloaded</option>
                         <option value="downloads-asc">Least Downloaded</option>
-                        <option value="rating-desc">Highest Rated</option>
-                        <option value="rating-asc">Lowest Rated</option>
                         <option value="updatedAt-desc">Recently Updated</option>
                         <option value="updatedAt-asc">Oldest Updated</option>
                         <option value="createdAt-desc">Newest Created</option>
@@ -739,38 +1206,9 @@ export function AdminPage() {
                 )}
               </div>
 
-              {/* Bulk Actions */}
-              {selectedForms.size > 0 && (
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 flex items-center justify-between">
-                  <span className="text-blue-700 font-medium">
-                    {selectedForms.size} form{selectedForms.size !== 1 ? 's' : ''} selected
-                  </span>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => handleBulkAction('approve')}>
-                      <CheckCircle className="w-4 h-4 mr-1" />
-                      Approve
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => handleBulkAction('reject')}>
-                      <XCircle className="w-4 h-4 mr-1" />
-                      Reject
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => handleBulkAction('delete')} className="text-red-600 border-red-200 hover:bg-red-50">
-                      <Trash2 className="w-4 h-4 mr-1" />
-                      Delete
-                    </Button>
-                    <button
-                      onClick={() => setSelectedForms(new Set())}
-                      className="text-sm text-gray-500 hover:text-gray-700 ml-2"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {/* Results Count */}
               <div className="mb-4 text-sm text-[#718096]">
-                Showing {filteredForms.length} of {sampleForms.length} forms
+                Showing {filteredForms.length} of {forms?.length || 0} forms
               </div>
 
               {/* Table View */}
@@ -820,15 +1258,6 @@ export function AdminPage() {
                           </th>
                           <th
                             className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                            onClick={() => handleSort('rating')}
-                          >
-                            <div className="flex items-center gap-1">
-                              Rating
-                              <SortIcon field="rating" />
-                            </div>
-                          </th>
-                          <th
-                            className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                             onClick={() => handleSort('updatedAt')}
                           >
                             <div className="flex items-center gap-1">
@@ -837,7 +1266,7 @@ export function AdminPage() {
                             </div>
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                            Visible
+                            Status
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
                             Actions
@@ -845,83 +1274,73 @@ export function AdminPage() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {filteredForms.map((form) => (
-                          <tr key={form.id} className="hover:bg-gray-50">
-                            <td className="px-4 py-3">
-                              <input
-                                type="checkbox"
-                                checked={selectedForms.has(form.id)}
-                                onChange={() => handleSelectForm(form.id)}
-                                className="w-4 h-4 rounded border-gray-300"
-                              />
-                            </td>
-                            <td className="px-4 py-3">
-                              <div>
-                                <Link
-                                  to={`/form/${form.id}`}
-                                  className="font-medium text-[#1A202C] hover:text-[#3182CE]"
-                                >
-                                  {form.title}
-                                </Link>
-                                <p className="text-xs text-gray-500 mt-0.5">{form.institution}</p>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="text-sm text-gray-600">{form.category}</span>
-                            </td>
-                            <td className="px-4 py-3">
-                              {getVerificationBadge(form.verificationLevel)}
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="text-sm font-medium text-gray-900">
-                                {form.downloads.toLocaleString()}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-1">
-                                <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
-                                <span className="text-sm font-medium">{form.rating.toFixed(1)}</span>
-                                <span className="text-xs text-gray-400">({form.ratingCount})</span>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="text-sm text-gray-500">
-                                {new Date(form.updatedAt).toLocaleDateString()}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <button
-                                onClick={() => handleToggleVisibility(form.id)}
-                                className={`p-1.5 rounded-lg transition-colors ${
-                                  formVisibilityState[form.id] !== false
-                                    ? 'text-green-600 hover:bg-green-50'
-                                    : 'text-gray-400 hover:bg-gray-100'
-                                }`}
-                                title={formVisibilityState[form.id] !== false ? 'Visible - Click to hide' : 'Hidden - Click to show'}
-                              >
-                                {formVisibilityState[form.id] !== false ? (
-                                  <Eye className="w-5 h-5" />
-                                ) : (
-                                  <EyeOff className="w-5 h-5" />
-                                )}
-                              </button>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-1">
-                                <FormActions form={form} />
-                                {isCustomForm(form.id) && (
-                                  <button
-                                    onClick={() => handleDeleteForm(form.id)}
-                                    className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
-                                    title="Delete form"
+                        {filteredForms.map((form) => {
+                          const category = categoryMap.get(form.categoryId);
+                          const institution = institutionMap.get(form.institutionId);
+                          return (
+                            <tr key={form.id} className="hover:bg-gray-50">
+                              <td className="px-4 py-3">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedForms.has(form.id)}
+                                  onChange={() => handleSelectForm(form.id)}
+                                  className="w-4 h-4 rounded border-gray-300"
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <div>
+                                  <Link
+                                    to={`/form/${form.id}`}
+                                    className="font-medium text-[#1A202C] hover:text-[#3182CE]"
                                   >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                                    {getFormLocalizedTitle(form, 'en')}
+                                  </Link>
+                                  <p className="text-xs text-gray-500 mt-0.5">
+                                    {institution ? getInstitutionLocalizedName(institution, 'en') : form.institutionId}
+                                  </p>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="text-sm text-gray-600">
+                                  {category ? getCategoryLocalizedName(category, 'en') : form.categoryId}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3">
+                                {getVerificationBadge(form.verificationLevel)}
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="text-sm font-medium text-gray-900">
+                                  {form.downloadCount.toLocaleString()}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="text-sm text-gray-500">
+                                  {toDate(form.updatedAt).toLocaleDateString()}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <button
+                                  onClick={() => handleToggleVisibility(form)}
+                                  className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs ${
+                                    form.status === 'published'
+                                      ? 'bg-green-100 text-green-700'
+                                      : 'bg-gray-100 text-gray-600'
+                                  }`}
+                                >
+                                  {form.status === 'published' ? (
+                                    <Eye className="w-3 h-3" />
+                                  ) : (
+                                    <EyeOff className="w-3 h-3" />
+                                  )}
+                                  {form.status}
+                                </button>
+                              </td>
+                              <td className="px-4 py-3">
+                                <FormActions form={form} />
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -939,83 +1358,59 @@ export function AdminPage() {
               {/* Grid View */}
               {viewMode === 'grid' && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {filteredForms.map((form) => (
-                    <div
-                      key={form.id}
-                      className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow"
-                    >
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={selectedForms.has(form.id)}
-                            onChange={() => handleSelectForm(form.id)}
-                            className="w-4 h-4 rounded border-gray-300"
-                          />
-                          {getVerificationBadge(form.verificationLevel)}
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleToggleVisibility(form.id)}
-                            className={`p-1.5 rounded-lg transition-colors ${
-                              formVisibilityState[form.id] !== false
-                                ? 'text-green-600 hover:bg-green-50'
-                                : 'text-gray-400 hover:bg-gray-100'
-                            }`}
-                            title={formVisibilityState[form.id] !== false ? 'Visible' : 'Hidden'}
-                          >
-                            {formVisibilityState[form.id] !== false ? (
-                              <Eye className="w-4 h-4" />
-                            ) : (
-                              <EyeOff className="w-4 h-4" />
-                            )}
-                          </button>
-                          {isCustomForm(form.id) && (
-                            <button
-                              onClick={() => handleDeleteForm(form.id)}
-                              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
-                              title="Delete form"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
+                  {filteredForms.map((form) => {
+                    const category = categoryMap.get(form.categoryId);
+                    const institution = institutionMap.get(form.institutionId);
+                    return (
+                      <div
+                        key={form.id}
+                        className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow"
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedForms.has(form.id)}
+                              onChange={() => handleSelectForm(form.id)}
+                              className="w-4 h-4 rounded border-gray-300"
+                            />
+                            {getVerificationBadge(form.verificationLevel)}
+                          </div>
                           <FormActions form={form} />
                         </div>
-                      </div>
 
-                      <Link to={`/form/${form.id}`}>
-                        <h3 className="font-semibold text-[#1A202C] hover:text-[#3182CE] mb-1">
-                          {form.title}
-                        </h3>
-                      </Link>
-                      <p className="text-sm text-gray-500 mb-3">{form.institution}</p>
+                        <Link to={`/form/${form.id}`}>
+                          <h3 className="font-semibold text-[#1A202C] hover:text-[#3182CE] mb-1">
+                            {getFormLocalizedTitle(form, 'en')}
+                          </h3>
+                        </Link>
+                        <p className="text-sm text-gray-500 mb-3">
+                          {institution ? getInstitutionLocalizedName(institution, 'en') : form.institutionId}
+                        </p>
 
-                      <div className="flex items-center gap-4 text-sm text-gray-600">
-                        <div className="flex items-center gap-1">
-                          <Download className="w-4 h-4" />
-                          {form.downloads.toLocaleString()}
+                        <div className="flex items-center gap-4 text-sm text-gray-600">
+                          <div className="flex items-center gap-1">
+                            <Download className="w-4 h-4" />
+                            {form.downloadCount.toLocaleString()}
+                          </div>
+                          <span className="px-2 py-0.5 bg-gray-100 rounded text-xs">
+                            {category ? getCategoryLocalizedName(category, 'en') : form.categoryId}
+                          </span>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
-                          {form.rating.toFixed(1)}
-                        </div>
-                        <span className="px-2 py-0.5 bg-gray-100 rounded text-xs">
-                          {form.category}
-                        </span>
-                      </div>
 
-                      <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
-                        <span className="text-xs text-gray-400">
-                          Updated {new Date(form.updatedAt).toLocaleDateString()}
-                        </span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${
-                          form.status === 'published' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          {form.status}
-                        </span>
+                        <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
+                          <span className="text-xs text-gray-400">
+                            Updated {toDate(form.updatedAt).toLocaleDateString()}
+                          </span>
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${
+                            form.status === 'published' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {form.status}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
 
                   {filteredForms.length === 0 && (
                     <div className="col-span-2 text-center py-12 bg-white rounded-xl border border-gray-200">
@@ -1028,6 +1423,7 @@ export function AdminPage() {
               )}
             </div>
           </div>
+          )}
         </div>
       </div>
 
@@ -1101,6 +1497,175 @@ export function AdminPage() {
               >
                 <Trash2 className="w-4 h-4 mr-2" />
                 Delete Form
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Institution Modal */}
+      {editingInstitution && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-[#1A202C]">Edit Institution</h3>
+              <button
+                onClick={() => setEditingInstitution(null)}
+                className="p-1 hover:bg-gray-100 rounded"
+              >
+                <XCircle className="w-5 h-5 text-gray-400" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Institution Name *
+                </label>
+                <input
+                  type="text"
+                  value={institutionFormData.name}
+                  onChange={(e) => setInstitutionFormData({ ...institutionFormData, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                <textarea
+                  value={institutionFormData.address}
+                  onChange={(e) => setInstitutionFormData({ ...institutionFormData, address: e.target.value })}
+                  rows={2}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Opening Hours</label>
+                <input
+                  type="text"
+                  value={institutionFormData.openingHours}
+                  onChange={(e) => setInstitutionFormData({ ...institutionFormData, openingHours: e.target.value })}
+                  placeholder="e.g., Mon-Fri 8:30 AM - 4:30 PM"
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Telephone Numbers</label>
+                {institutionFormData.telephoneNumbers.map((phone, i) => (
+                  <div key={i} className="flex gap-2 mb-2">
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => {
+                        const updated = [...institutionFormData.telephoneNumbers];
+                        updated[i] = e.target.value;
+                        setInstitutionFormData({ ...institutionFormData, telephoneNumbers: updated });
+                      }}
+                      className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                    />
+                    {i > 0 && (
+                      <button
+                        onClick={() => {
+                          const updated = institutionFormData.telephoneNumbers.filter((_, idx) => idx !== i);
+                          setInstitutionFormData({ ...institutionFormData, telephoneNumbers: updated });
+                        }}
+                        className="p-2 text-red-500 hover:bg-red-50 rounded"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {institutionFormData.telephoneNumbers.length < 5 && (
+                  <button
+                    onClick={() => setInstitutionFormData({
+                      ...institutionFormData,
+                      telephoneNumbers: [...institutionFormData.telephoneNumbers, '']
+                    })}
+                    className="text-sm text-[#3182CE] hover:underline"
+                  >
+                    + Add phone number
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={institutionFormData.email}
+                    onChange={(e) => setInstitutionFormData({ ...institutionFormData, email: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Website</label>
+                  <input
+                    type="url"
+                    value={institutionFormData.website}
+                    onChange={(e) => setInstitutionFormData({ ...institutionFormData, website: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => setEditingInstitution(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                onClick={handleSaveInstitution}
+                disabled={!institutionFormData.name.trim()}
+              >
+                <Check className="w-4 h-4 mr-2" />
+                Save Changes
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Institution Confirmation Modal */}
+      {showDeleteInstitutionModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                <Trash2 className="w-6 h-6 text-red-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-[#1A202C]">Delete Institution</h3>
+                <p className="text-sm text-gray-500">This action cannot be undone</p>
+              </div>
+            </div>
+            <p className="text-gray-600 mb-6">
+              Are you sure you want to delete this institution? Forms using this institution will not be affected.
+            </p>
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => setShowDeleteInstitutionModal(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1 bg-red-600 hover:bg-red-700"
+                onClick={confirmDeleteInstitution}
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Delete
               </Button>
             </div>
           </div>

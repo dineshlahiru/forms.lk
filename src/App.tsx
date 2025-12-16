@@ -1,4 +1,8 @@
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import { UploadQueueProvider } from './context/UploadQueueContext';
+import { isLocalStorage, seedLocalDatabase, isLocalDatabaseSeeded, devLogin } from './services';
 import { HomePage } from './pages/HomePage';
 import { FormsLibraryPage } from './pages/FormsLibraryPage';
 import { FormDetailPage } from './pages/FormDetailPage';
@@ -11,6 +15,7 @@ import { DualCitizenshipFormPage } from './pages/DualCitizenshipFormPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { AdminPage } from './pages/AdminPage';
 import { FormDigitizerPage } from './pages/FormDigitizerPage';
+import { SetupPage } from './pages/SetupPage';
 import { CustomFormFillerPage } from './pages/CustomFormFillerPage';
 import { AdvancedFormFillerPage } from './pages/AdvancedFormFillerPage';
 import { Layout } from './components/layout/Layout';
@@ -31,25 +36,74 @@ function NotFoundPage() {
 }
 
 function App() {
+  const [isInitialized, setIsInitialized] = useState(!isLocalStorage());
+
+  // Initialize local database when in local mode
+  useEffect(() => {
+    if (!isLocalStorage()) return;
+
+    const initLocalMode = async () => {
+      try {
+        // Check if database needs seeding
+        const isSeeded = await isLocalDatabaseSeeded();
+        if (!isSeeded) {
+          console.log('[App] Seeding local database...');
+          const result = await seedLocalDatabase();
+          console.log('[App] Seed result:', result);
+        } else {
+          console.log('[App] Local database already seeded');
+        }
+
+        // Auto-login as dev admin for convenience
+        console.log('[App] Auto-logging in as dev admin...');
+        await devLogin();
+        console.log('[App] Dev login complete');
+      } catch (error) {
+        console.error('[App] Local mode initialization failed:', error);
+      } finally {
+        setIsInitialized(true);
+      }
+    };
+
+    initLocalMode();
+  }, []);
+
+  // Show loading while initializing local mode
+  if (!isInitialized) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Initializing local database...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/forms" element={<FormsLibraryPage />} />
-        <Route path="/form/:formId" element={<FormDetailPage />} />
-        <Route path="/fill/:formId" element={<FormFillerPage />} />
-        <Route path="/fill/disaster-relief" element={<DisasterReliefFormPage />} />
-        <Route path="/fill/passport-application" element={<PassportApplicationPage />} />
-        <Route path="/fill/police-clearance-embassy" element={<PoliceClearanceFormPage />} />
-        <Route path="/fill/dual-citizenship" element={<DualCitizenshipFormPage />} />
-        <Route path="/fill/custom/:formId" element={<CustomFormFillerPage />} />
-        <Route path="/fill/advanced/:formId" element={<AdvancedFormFillerPage />} />
-        <Route path="/builder" element={<FormBuilderPage />} />
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/admin" element={<AdminPage />} />
-        <Route path="/admin/digitizer" element={<FormDigitizerPage />} />
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+      <AuthProvider>
+        <UploadQueueProvider>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/forms" element={<FormsLibraryPage />} />
+            <Route path="/form/:formId" element={<FormDetailPage />} />
+            <Route path="/fill/:formId" element={<FormFillerPage />} />
+            <Route path="/fill/disaster-relief" element={<DisasterReliefFormPage />} />
+            <Route path="/fill/passport-application" element={<PassportApplicationPage />} />
+            <Route path="/fill/police-clearance-embassy" element={<PoliceClearanceFormPage />} />
+            <Route path="/fill/dual-citizenship" element={<DualCitizenshipFormPage />} />
+            <Route path="/fill/custom/:formId" element={<CustomFormFillerPage />} />
+            <Route path="/fill/advanced/:formId" element={<AdvancedFormFillerPage />} />
+            <Route path="/builder" element={<FormBuilderPage />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/admin" element={<AdminPage />} />
+            <Route path="/admin/digitizer" element={<FormDigitizerPage />} />
+            <Route path="/setup" element={<SetupPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </UploadQueueProvider>
+      </AuthProvider>
     </BrowserRouter>
   );
 }
