@@ -34,3 +34,43 @@ body {
 #root {
   min-height: 100vh;
 }
+
+/**
+ * Print styles for PDF Fill Page
+ *
+ * APPROVED BEHAVIOR - DO NOT CHANGE WITHOUT USER CONFIRMATION
+ *
+ * Standard form filling behavior:
+ * 1. ON LOAD (empty fields): Show dashed border
+ * 2. AFTER TEXT ENTERED: Border invisible
+ * 3. ON PRINT: All borders hidden (this section)
+ *
+ * Applied to all current and future forms.
+ */
+@media print {
+  /* Hide all field borders when printing - creates clean PDF output */
+  .pdf-field-overlay input,
+  .pdf-field-overlay select,
+  .pdf-field-overlay div {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+
+  /* Hide UI elements when printing */
+  .no-print,
+  header,
+  nav,
+  footer,
+  .sticky {
+    display: none !important;
+  }
+
+  /* Make PDF container full width */
+  .print-full-width {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+}
