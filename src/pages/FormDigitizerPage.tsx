@@ -770,16 +770,20 @@ Return ONLY valid JSON in this exact format:
 
   // Handle click on PDF to place field
   const handlePdfClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!placementMode || !selectedFieldForPlacement) return;
+    // If not in placement mode, hide the properties panel
+    if (!placementMode || !selectedFieldForPlacement) {
+      setShowFieldPopup(null);
+      return;
+    }
 
     const container = pdfPreviewRef.current;
     if (!container) return;
 
     const rect = container.getBoundingClientRect();
-    // Add 1px offset so the field box starts after the click position
-    const offsetPx = 1;
-    const x = ((e.clientX - rect.left + offsetPx) / rect.width) * 100;
-    const y = ((e.clientY - rect.top + offsetPx) / rect.height) * 100;
+    // Position field 2px above the mouse pointer
+    const yOffsetPx = 2;
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top - yOffsetPx) / rect.height) * 100;
 
     // Update field position
     updateField(selectedFieldForPlacement, {

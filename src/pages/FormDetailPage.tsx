@@ -359,7 +359,7 @@ export function FormDetailPage() {
               )}
               <div className="flex items-center justify-between">
                 <p className="text-[#718096]">
-                  {institution ? getInstitutionLocalizedName(institution, selectedLanguage) : form.institutionId}
+                  {institution ? getInstitutionLocalizedName(institution, selectedLanguage) : 'Government Institution'}
                 </p>
                 {/* Language Selector */}
                 {availableLanguages.length > 1 && (
