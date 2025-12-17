@@ -60,6 +60,16 @@ const verificationInfo = {
   3: { icon: Award, label: 'Official', color: 'gold', description: 'Endorsed by the official institution.' },
 };
 
+// Helper to safely convert timestamps (Firebase Timestamp or ISO string)
+function toDate(timestamp: unknown): Date {
+  if (!timestamp) return new Date();
+  if (typeof timestamp === 'string') return new Date(timestamp);
+  if (typeof timestamp === 'object' && 'toDate' in timestamp && typeof (timestamp as { toDate: () => Date }).toDate === 'function') {
+    return (timestamp as { toDate: () => Date }).toDate();
+  }
+  return new Date();
+}
+
 export function FormDetailPage() {
   const { formId } = useParams<{ formId: string }>();
 
@@ -577,7 +587,7 @@ export function FormDetailPage() {
                   <div>
                     <span className="text-sm font-medium text-[#4A5568]">Last Updated</span>
                     <p className="text-sm text-[#718096]">
-                      {form.updatedAt.toDate().toLocaleDateString()}
+                      {toDate(form.updatedAt).toLocaleDateString()}
                     </p>
                   </div>
                 </div>
@@ -598,7 +608,7 @@ export function FormDetailPage() {
                     <div>
                       <span className="text-sm font-medium text-[#4A5568]">Published</span>
                       <p className="text-sm text-[#718096]">
-                        {form.publishedAt.toDate().toLocaleDateString()}
+                        {toDate(form.publishedAt).toLocaleDateString()}
                       </p>
                     </div>
                   </div>
@@ -872,7 +882,7 @@ export function FormDetailPage() {
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-[#718096]">Last Updated</span>
                   <span className="text-sm font-medium text-[#1A202C]">
-                    {form.updatedAt.toDate().toLocaleDateString()}
+                    {toDate(form.updatedAt).toLocaleDateString()}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">

@@ -85,6 +85,23 @@ async function deleteFilesByPrefix(prefix: string): Promise<void> {
   });
 }
 
+// Save PDF to filesystem via dev server API
+async function savePdfToFilesystem(formId: string, language: string, pdfBase64: string): Promise<void> {
+  try {
+    const response = await fetch('/api/save-pdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ formId, language, pdfBase64 }),
+    });
+    if (!response.ok) {
+      console.warn('Could not save PDF to filesystem (dev server feature)');
+    }
+  } catch {
+    // Silently fail - this is a dev convenience feature
+    console.warn('PDF filesystem save not available (only works in dev mode)');
+  }
+}
+
 // Upload form PDF - accepts File or base64 string
 export async function uploadFormPdf(
   formId: string,
@@ -96,15 +113,22 @@ export async function uploadFormPdf(
 
   let dataToStore: ArrayBuffer | string;
   let totalSize: number;
+  let base64Data: string;
 
   if (typeof fileOrBase64 === 'string') {
     // It's a base64 string - store directly
     dataToStore = fileOrBase64;
+    base64Data = fileOrBase64;
     totalSize = fileOrBase64.length;
   } else {
-    // It's a File object - convert to ArrayBuffer
+    // It's a File object - convert to ArrayBuffer and base64
     dataToStore = await fileOrBase64.arrayBuffer();
     totalSize = fileOrBase64.size;
+    // Convert ArrayBuffer to base64 for filesystem storage
+    const bytes = new Uint8Array(dataToStore);
+    let binary = '';
+    bytes.forEach(b => binary += String.fromCharCode(b));
+    base64Data = 'data:application/pdf;base64,' + btoa(binary);
   }
 
   // Simulate progress
@@ -116,7 +140,11 @@ export async function uploadFormPdf(
     onProgress({ bytesTransferred: totalSize / 2, totalBytes: totalSize, progress: 50 });
   }
 
+  // Store in IndexedDB
   await storeFile(path, dataToStore);
+
+  // Also save to /public/forms/ for easy access
+  await savePdfToFilesystem(formId, language, base64Data);
 
   if (onProgress) {
     onProgress({ bytesTransferred: totalSize, totalBytes: totalSize, progress: 100 });
