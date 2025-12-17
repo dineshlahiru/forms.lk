@@ -362,8 +362,8 @@ export function AdvancedFormFillerPage() {
   };
 
   // Check if option looks like "Other"
-  const isOtherOption = (option: string) => {
-    const lower = option.toLowerCase().trim();
+  const isOtherOption = (optionValue: string) => {
+    const lower = optionValue.toLowerCase().trim();
     return lower === 'other' || lower === 'others' || lower.includes('specify');
   };
 
@@ -371,10 +371,10 @@ export function AdvancedFormFillerPage() {
   const hasOtherSelected = (field: FormFieldData) => {
     const value = fieldValues[field.id];
     if (field.type === 'radio' || field.type === 'dropdown') {
-      return typeof value === 'string' && field.options?.some(opt => isOtherOption(opt) && opt === value);
+      return typeof value === 'string' && field.options?.some(opt => isOtherOption(opt.value) && opt.value === value);
     }
     if (field.type === 'checkbox' && Array.isArray(value)) {
-      return field.options?.some(opt => isOtherOption(opt) && value.includes(opt));
+      return field.options?.some(opt => isOtherOption(opt.value) && value.includes(opt.value));
     }
     return false;
   };
@@ -427,17 +427,17 @@ export function AdvancedFormFillerPage() {
                 <label key={i} className="flex items-center gap-2 cursor-pointer text-sm">
                   <input
                     type="checkbox"
-                    checked={selectedOptions.includes(option)}
+                    checked={selectedOptions.includes(option.value)}
                     onChange={(e) => {
                       if (e.target.checked) {
-                        updateFieldValue(field.id, [...selectedOptions, option]);
+                        updateFieldValue(field.id, [...selectedOptions, option.value]);
                       } else {
-                        updateFieldValue(field.id, selectedOptions.filter(o => o !== option));
+                        updateFieldValue(field.id, selectedOptions.filter(o => o !== option.value));
                       }
                     }}
                     className="w-4 h-4 rounded border-gray-300 text-[#3182CE]"
                   />
-                  <span>{option}</span>
+                  <span>{option.label}</span>
                 </label>
               ))}
               {hasOtherSelected(field) && (
@@ -472,11 +472,11 @@ export function AdvancedFormFillerPage() {
                 <input
                   type="radio"
                   name={field.id}
-                  checked={value === option}
-                  onChange={() => updateFieldValue(field.id, option)}
+                  checked={value === option.value}
+                  onChange={() => updateFieldValue(field.id, option.value)}
                   className="w-4 h-4 border-gray-300 text-[#3182CE]"
                 />
-                <span>{option}</span>
+                <span>{option.label}</span>
               </label>
             ))}
             {hasOtherSelected(field) && (
@@ -502,7 +502,7 @@ export function AdvancedFormFillerPage() {
             >
               <option value="">Select...</option>
               {(field.options || []).map((option, i) => (
-                <option key={i} value={option}>{option}</option>
+                <option key={i} value={option.value}>{option.label}</option>
               ))}
             </select>
             {hasOtherSelected(field) && (
