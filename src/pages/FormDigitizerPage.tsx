@@ -96,6 +96,7 @@ interface FormField {
 interface FormMetadata {
   section: string;       // Government section number
   formNumber: string;    // Government form number
+  publishDate: string;   // Official form publish date
   title: string;
   titleSi: string;  // Sinhala title
   titleTa: string;  // Tamil title
@@ -202,6 +203,7 @@ export function FormDigitizerPage() {
   const [metadata, setMetadata] = useState<FormMetadata>({
     section: '',
     formNumber: '',
+    publishDate: '',
     title: '',
     titleSi: '',
     titleTa: '',
@@ -936,6 +938,7 @@ Return ONLY valid JSON in this exact format:
         id: formId,
         section: metadata.section || undefined,
         formNumber: metadata.formNumber || undefined,
+        publishDate: metadata.publishDate || undefined,
         title: metadata.title,
         titleSi: metadata.titleSi || undefined,
         titleTa: metadata.titleTa || undefined,
@@ -1675,8 +1678,8 @@ Return ONLY valid JSON in this exact format:
                   </div>
 
                   <div className="space-y-3">
-                    {/* Section and Form Number - Government identifiers */}
-                    <div className="grid grid-cols-2 gap-3">
+                    {/* Section, Form Number, Publish Date - Government identifiers */}
+                    <div className="grid grid-cols-3 gap-3">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Section</label>
                         <input
@@ -1694,6 +1697,15 @@ Return ONLY valid JSON in this exact format:
                           value={metadata.formNumber}
                           onChange={(e) => setMetadata({ ...metadata, formNumber: e.target.value })}
                           placeholder="e.g., GN-001"
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Publish Date</label>
+                        <input
+                          type="date"
+                          value={metadata.publishDate}
+                          onChange={(e) => setMetadata({ ...metadata, publishDate: e.target.value })}
                           className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#3182CE]"
                         />
                       </div>

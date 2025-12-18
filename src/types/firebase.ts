@@ -47,6 +47,7 @@ export interface FirebaseForm {
   id: string;
   formNumber?: string;
   section?: string;
+  publishDate?: string; // Official form publish date (e.g., "2024-01-15")
   slug: string;
   title: string;
   titleSi?: string;

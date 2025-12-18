@@ -31,6 +31,7 @@ import {
   Loader2,
   ChevronLeft,
   ChevronRight,
+  Building2,
 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/ui/Button';
@@ -335,7 +336,28 @@ export function FormDetailPage() {
         </Link>
 
         {/* Header with Title and Actions */}
-        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6 relative">
+          {/* Language Selector - positioned at bottom right */}
+          {availableLanguages.length > 1 && (
+            <div className="absolute right-6 bottom-6 flex items-center gap-2">
+              <Languages className="w-4 h-4 text-gray-400" />
+              <div className="flex gap-1">
+                {availableLanguages.map((lang) => (
+                  <button
+                    key={lang}
+                    onClick={() => setSelectedLanguage(lang)}
+                    className={`px-3 py-1 rounded text-xs font-medium transition-all ${
+                      selectedLanguage === lang
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    {LANGUAGES[lang]?.nativeLabel || lang}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
             {/* Left: Title and Info */}
             <div className="flex-1">
@@ -367,30 +389,28 @@ export function FormDetailPage() {
                   {getFormLocalizedTitle(form, selectedLanguage)}
                 </h1>
               )}
-              <div className="flex items-center justify-between">
-                <p className="text-[#718096]">
-                  {institution ? getInstitutionLocalizedName(institution, selectedLanguage) : 'Government Institution'}
-                </p>
-                {/* Language Selector */}
-                {availableLanguages.length > 1 && (
-                  <div className="flex items-center gap-2">
-                    <Languages className="w-4 h-4 text-gray-400" />
-                    <div className="flex gap-1">
-                      {availableLanguages.map((lang) => (
-                        <button
-                          key={lang}
-                          onClick={() => setSelectedLanguage(lang)}
-                          className={`px-3 py-1 rounded text-xs font-medium transition-all ${
-                            selectedLanguage === lang
-                              ? 'bg-blue-600 text-white'
-                              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                          }`}
-                        >
-                          {LANGUAGES[lang]?.nativeLabel || lang}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+              {/* Form metadata: Institution, Section, Form Nr, Published Date */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[#718096]">
+                {institution && (
+                  <span>{getInstitutionLocalizedName(institution, selectedLanguage)}</span>
+                )}
+                {form.section && (
+                  <>
+                    <span className="text-gray-300">|</span>
+                    <span>Section: {form.section}</span>
+                  </>
+                )}
+                {form.formNumber && (
+                  <>
+                    <span className="text-gray-300">|</span>
+                    <span>Form Nr: {form.formNumber}</span>
+                  </>
+                )}
+                {form.publishDate && (
+                  <>
+                    <span className="text-gray-300">|</span>
+                    <span>Published: {new Date(form.publishDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                  </>
                 )}
               </div>
 
@@ -548,6 +568,54 @@ export function FormDetailPage() {
 
               {/* Form Metadata Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-gray-100">
+                {/* Institution */}
+                <div className="flex items-start gap-3">
+                  <Building2 className="w-5 h-5 text-[#718096] mt-0.5" />
+                  <div className="flex-1">
+                    <span className="text-sm font-medium text-[#4A5568]">Institution</span>
+                    {isEditing ? (
+                      <select
+                        value={(editedForm.institutionId as string) || ''}
+                        onChange={(e) => updateField('institutionId', e.target.value)}
+                        className="w-full mt-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      >
+                        <option value="">Select Institution...</option>
+                        {institutions?.map((inst) => (
+                          <option key={inst.id} value={inst.id}>
+                            {getInstitutionLocalizedName(inst, selectedLanguage)}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <p className="text-sm text-[#718096]">
+                        {institution ? getInstitutionLocalizedName(institution, selectedLanguage) : 'Not specified'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Publish Date */}
+                <div className="flex items-start gap-3">
+                  <Calendar className="w-5 h-5 text-[#718096] mt-0.5" />
+                  <div className="flex-1">
+                    <span className="text-sm font-medium text-[#4A5568]">Publish Date</span>
+                    {isEditing ? (
+                      <input
+                        type="date"
+                        value={(editedForm.publishDate as string) || ''}
+                        onChange={(e) => updateField('publishDate', e.target.value)}
+                        className="w-full mt-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    ) : (
+                      <p className="text-sm text-[#718096]">
+                        {form.publishDate
+                          ? new Date(form.publishDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+                          : 'Not specified'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
                 {/* Form Number */}
                 {form.formNumber && (
                   <div className="flex items-start gap-3">

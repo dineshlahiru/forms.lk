@@ -34,9 +34,9 @@ import {
 } from 'lucide-react';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/ui/Button';
-import { useForm, useFormFields } from '../hooks';
-import { getFileAsDataUrl } from '../services';
-import type { Language, FieldPosition } from '../types/firebase';
+import { useForm, useFormFields, useInstitutions } from '../hooks';
+import { getFileAsDataUrl, getInstitutionLocalizedName } from '../services';
+import type { Language, FieldPosition, FirebaseInstitution } from '../types/firebase';
 
 // Field data for PDF fill mode
 interface PdfFieldData {
@@ -56,6 +56,16 @@ export function FormFillerPage() {
   // Try loading from Firebase/local database first
   const { data: dbForm, loading: dbLoading } = useForm(formId);
   const { data: dbFields } = useFormFields(formId);
+  const { data: institutions } = useInstitutions();
+
+  // Create institution map for lookup
+  const institutionMap = useMemo(() => {
+    if (!institutions) return new Map<string, FirebaseInstitution>();
+    return new Map(institutions.map(inst => [inst.id, inst]));
+  }, [institutions]);
+
+  // Get institution for this form
+  const institution = dbForm?.institutionId ? institutionMap.get(dbForm.institutionId) : null;
 
   // State
   const [values, setValues] = useState<Record<string, string | string[] | boolean>>({});
@@ -477,7 +487,31 @@ export function FormFillerPage() {
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <h1 className="text-2xl font-bold text-[#1A202C] mb-1">{dbForm.title}</h1>
-              <p className="text-[#718096]">Click on fields in the PDF to fill them</p>
+              {/* Form metadata: Institution, Section, Form Nr, Published Date */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[#718096] mt-1">
+                {institution && (
+                  <span>{getInstitutionLocalizedName(institution, 'en')}</span>
+                )}
+                {dbForm.section && (
+                  <>
+                    {institution && <span className="text-gray-300">|</span>}
+                    <span>Section: {dbForm.section}</span>
+                  </>
+                )}
+                {dbForm.formNumber && (
+                  <>
+                    {(institution || dbForm.section) && <span className="text-gray-300">|</span>}
+                    <span>Form Nr: {dbForm.formNumber}</span>
+                  </>
+                )}
+                {dbForm.publishDate && (
+                  <>
+                    {(institution || dbForm.section || dbForm.formNumber) && <span className="text-gray-300">|</span>}
+                    <span>Published: {new Date(dbForm.publishDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                  </>
+                )}
+              </div>
+              <p className="text-[#718096] text-sm mt-2">Click on fields in the PDF to fill them</p>
             </div>
           </div>
 

@@ -23,6 +23,7 @@ export interface LocalFormData {
   id: string;
   formNumber?: string;
   section?: string;
+  publishDate?: string; // Official form publish date
   title: string;
   titleSi?: string;
   titleTa?: string;
