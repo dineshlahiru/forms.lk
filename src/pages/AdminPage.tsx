@@ -69,6 +69,7 @@ const verificationLabels = {
 };
 
 type AdminTab = 'forms' | 'uploads';
+type MainView = 'forms' | 'institutions';
 
 // Helper to safely convert timestamps (Firebase Timestamp or ISO string)
 function toDate(timestamp: unknown): Date {
@@ -111,6 +112,10 @@ export function AdminPage() {
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
   const [showVerificationModal, setShowVerificationModal] = useState<string | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState<string | null>(null);
+
+  // Main view state (forms or institutions)
+  const [mainView, setMainView] = useState<MainView>('forms');
+  const [institutionSearch, setInstitutionSearch] = useState('');
 
   // Institutions state
   const [showInstitutionsPanel, setShowInstitutionsPanel] = useState(false);
@@ -439,6 +444,20 @@ export function AdminPage() {
 
     return result;
   }, [forms, searchQuery, selectedCategory, selectedStatus, selectedVerification, sortField, sortOrder]);
+
+  // Filter institutions
+  const filteredInstitutions = useMemo(() => {
+    if (!institutions) return [];
+
+    if (!institutionSearch) return institutions;
+
+    const query = institutionSearch.toLowerCase();
+    return institutions.filter(inst =>
+      inst.name.toLowerCase().includes(query) ||
+      inst.address?.toLowerCase().includes(query) ||
+      inst.email?.toLowerCase().includes(query)
+    );
+  }, [institutions, institutionSearch]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -848,8 +867,11 @@ export function AdminPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    className={`w-full justify-start ${showInstitutionsPanel ? 'bg-blue-50 border-blue-200 text-blue-700' : ''}`}
-                    onClick={() => setShowInstitutionsPanel(!showInstitutionsPanel)}
+                    className={`w-full justify-start ${mainView === 'institutions' ? 'bg-blue-50 border-blue-200 text-blue-700' : ''}`}
+                    onClick={() => {
+                      setMainView(mainView === 'institutions' ? 'forms' : 'institutions');
+                      setShowInstitutionsPanel(false);
+                    }}
                   >
                     <Building2 className="w-4 h-4 mr-2" />
                     Institutions
@@ -1026,15 +1048,25 @@ export function AdminPage() {
                           className="p-3 border border-gray-100 rounded-lg hover:bg-gray-50"
                         >
                           <div className="flex items-start justify-between">
-                            <div className="flex-1 min-w-0">
-                              <h4 className="font-medium text-sm text-gray-900 truncate">
+                            <Link
+                              to={`/admin/institution/${inst.id}`}
+                              className="flex-1 min-w-0 hover:text-blue-600"
+                            >
+                              <h4 className="font-medium text-sm text-gray-900 truncate hover:text-blue-600">
                                 {getInstitutionLocalizedName(inst, 'en')}
                               </h4>
                               {inst.address && (
                                 <p className="text-xs text-gray-500 mt-0.5 truncate">{inst.address}</p>
                               )}
-                            </div>
+                            </Link>
                             <div className="flex gap-1 ml-2">
+                              <Link
+                                to={`/admin/institution/${inst.id}`}
+                                className="p-1.5 text-purple-600 hover:bg-purple-50 rounded"
+                                title="Institution Intelligence"
+                              >
+                                <Users className="w-3.5 h-3.5" />
+                              </Link>
                               <button
                                 onClick={() => handleEditInstitution(inst)}
                                 className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
@@ -1087,6 +1119,179 @@ export function AdminPage() {
 
             {/* Main Table Area */}
             <div className="lg:col-span-3">
+              {/* View Toggle Header */}
+              <div className="flex items-center gap-4 mb-4">
+                <button
+                  onClick={() => setMainView('forms')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    mainView === 'forms'
+                      ? 'bg-[#1A365D] text-white'
+                      : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  <FileText className="w-4 h-4" />
+                  Forms
+                  <span className={`px-2 py-0.5 rounded-full text-xs ${
+                    mainView === 'forms' ? 'bg-white/20' : 'bg-gray-100'
+                  }`}>
+                    {forms?.length || 0}
+                  </span>
+                </button>
+                <button
+                  onClick={() => setMainView('institutions')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    mainView === 'institutions'
+                      ? 'bg-[#1A365D] text-white'
+                      : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  <Building2 className="w-4 h-4" />
+                  Institutions
+                  <span className={`px-2 py-0.5 rounded-full text-xs ${
+                    mainView === 'institutions' ? 'bg-white/20' : 'bg-gray-100'
+                  }`}>
+                    {institutions?.length || 0}
+                  </span>
+                </button>
+              </div>
+
+              {/* Institutions View */}
+              {mainView === 'institutions' && (
+                <div>
+                  {/* Institution Search */}
+                  <div className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
+                    <div className="flex flex-col md:flex-row gap-4">
+                      <div className="flex-1 relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                        <input
+                          type="text"
+                          placeholder="Search institutions by name, address, email..."
+                          value={institutionSearch}
+                          onChange={(e) => setInstitutionSearch(e.target.value)}
+                          className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#3182CE] focus:border-transparent text-sm"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Results Count */}
+                  <div className="mb-4 text-sm text-[#718096]">
+                    Showing {filteredInstitutions.length} of {institutions?.length || 0} institutions
+                  </div>
+
+                  {/* Institutions Grid */}
+                  {institutionsLoading ? (
+                    <div className="flex justify-center py-12">
+                      <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                    </div>
+                  ) : filteredInstitutions.length === 0 ? (
+                    <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                      <Building2 className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                      <h3 className="text-lg font-medium text-gray-900 mb-2">No Institutions Found</h3>
+                      <p className="text-gray-500">
+                        {institutions?.length === 0
+                          ? 'Visit Setup to seed institution data.'
+                          : 'Try adjusting your search.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {filteredInstitutions.map((inst) => (
+                        <div
+                          key={inst.id}
+                          className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow group"
+                        >
+                          <div className="flex items-start justify-between mb-3">
+                            <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                              <Building2 className="w-5 h-5 text-amber-600" />
+                            </div>
+                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <Link
+                                to={`/admin/institution/${inst.id}`}
+                                className="p-1.5 text-purple-600 hover:bg-purple-50 rounded"
+                                title="Institution Intelligence"
+                              >
+                                <Users className="w-4 h-4" />
+                              </Link>
+                              <button
+                                onClick={() => handleEditInstitution(inst)}
+                                className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
+                                title="Edit"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => setShowDeleteInstitutionModal(inst.id)}
+                                className="p-1.5 text-red-500 hover:bg-red-50 rounded"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+
+                          <Link to={`/admin/institution/${inst.id}`}>
+                            <h3 className="font-semibold text-[#1A202C] hover:text-[#3182CE] mb-1 line-clamp-2">
+                              {getInstitutionLocalizedName(inst, 'en')}
+                            </h3>
+                          </Link>
+                          {inst.address && (
+                            <p className="text-sm text-gray-500 mb-3 line-clamp-2">{inst.address}</p>
+                          )}
+
+                          <div className="pt-3 border-t border-gray-100 space-y-2">
+                            {inst.telephoneNumbers && inst.telephoneNumbers.length > 0 && (
+                              <div className="flex items-center gap-2 text-sm text-gray-600">
+                                <span className="text-green-500">📞</span>
+                                <span className="truncate">{inst.telephoneNumbers[0]}</span>
+                                {inst.telephoneNumbers.length > 1 && (
+                                  <span className="text-xs text-gray-400">+{inst.telephoneNumbers.length - 1}</span>
+                                )}
+                              </div>
+                            )}
+                            {inst.email && (
+                              <div className="flex items-center gap-2 text-sm text-gray-600">
+                                <span className="text-blue-500">📧</span>
+                                <span className="truncate">{inst.email}</span>
+                              </div>
+                            )}
+                            {inst.website && (
+                              <div className="flex items-center gap-2 text-sm text-gray-600">
+                                <span className="text-purple-500">🌐</span>
+                                <a
+                                  href={inst.website}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="truncate hover:underline"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {inst.website.replace(/^https?:\/\//, '')}
+                                </a>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
+                            <span className="text-xs text-gray-400">
+                              {stats.byInstitution[inst.id] || 0} forms
+                            </span>
+                            <Link
+                              to={`/admin/institution/${inst.id}`}
+                              className="text-xs text-[#3182CE] hover:underline"
+                            >
+                              View Intelligence →
+                            </Link>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Forms View */}
+              {mainView === 'forms' && (
+                <>
               {/* Filters & Search */}
               <div className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
                 <div className="flex flex-col md:flex-row gap-4">
@@ -1420,6 +1625,8 @@ export function AdminPage() {
                     </div>
                   )}
                 </div>
+              )}
+              </>
               )}
             </div>
           </div>

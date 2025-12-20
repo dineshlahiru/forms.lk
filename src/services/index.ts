@@ -108,6 +108,96 @@ export { syncToFirebase } from './local/syncToFirebase';
 export type { SyncProgress, SyncProgressCallback } from './local/syncToFirebase';
 
 // ========================================
+// Institution Intelligence Module
+// ========================================
+
+// Divisions service
+export {
+  getDivisions,
+  getAllDivisions,
+  getDivision,
+  getDivisionBySlug,
+  createDivision,
+  updateDivision,
+  deleteDivision,
+  hardDeleteDivision,
+  bulkCreateDivisions,
+  getOrCreateDivision,
+  updateDivisionContactCount,
+} from './local/divisions';
+
+// Contacts service
+export {
+  getContactsByDivision,
+  getContactsByInstitution,
+  getAllContacts,
+  getContact,
+  getContactByEmail,
+  getHeadContacts,
+  createContact,
+  updateContact,
+  deleteContact,
+  hardDeleteContact,
+  bulkCreateContacts,
+  deleteAllContactsForInstitution,
+  getContactHierarchy,
+  detectHierarchyLevel,
+  isHeadPosition,
+} from './local/contacts';
+
+// Institution Intelligence types
+export type {
+  Division,
+  CreateDivisionInput,
+  UpdateDivisionInput,
+  Contact,
+  CreateContactInput,
+  UpdateContactInput,
+  InstitutionSyncLog,
+  CreateSyncLogInput,
+  InstitutionSyncSettings,
+  ApiUsage,
+  CreateApiUsageInput,
+  ApiBudgetSettings,
+  UpdateApiBudgetInput,
+  BudgetStatus,
+  ExtractedContact,
+  ExtractedData,
+  ScrapeResult,
+  SyncPhase,
+  SyncProgressState,
+  ImportOptions,
+} from '../types/institution-intel';
+
+// Claude AI Scraper service
+export {
+  scrapeInstitutionWebsite,
+  extractContactsWithClaude,
+  generateContentHash,
+  getMonthlyApiUsage,
+  getApiBudgetSettings,
+  updateApiBudgetSettings,
+  checkBudgetAllowsSync,
+  convertExtractedToContactInputs,
+  logSyncOperation,
+  getSyncHistory,
+} from './local/scraper';
+
+// Sync Orchestrator service
+export {
+  preSyncCheck,
+  fetchAndExtract,
+  importContacts,
+  fullSync,
+  getInstitutionSyncSettings,
+  updateInstitutionSyncSettings,
+  getInstitutionSyncStatus,
+  institutionNeedsSync,
+  getInstitutionsNeedingSync,
+} from './local/syncOrchestrator';
+export type { SyncProgressCallback, SyncResult } from './local/syncOrchestrator';
+
+// ========================================
 // Firebase-only services (not yet migrated to local)
 // These will use Firebase even in local mode
 // ========================================

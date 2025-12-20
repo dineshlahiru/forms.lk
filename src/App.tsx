@@ -15,6 +15,7 @@ import { DualCitizenshipFormPage } from './pages/DualCitizenshipFormPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { AdminPage } from './pages/AdminPage';
 import { FormDigitizerPage } from './pages/FormDigitizerPage';
+import { InstitutionIntelligencePage } from './pages/InstitutionIntelligencePage';
 import { SetupPage } from './pages/SetupPage';
 import { CustomFormFillerPage } from './pages/CustomFormFillerPage';
 import { AdvancedFormFillerPage } from './pages/AdvancedFormFillerPage';
@@ -99,6 +100,7 @@ function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/admin" element={<AdminPage />} />
             <Route path="/admin/digitizer" element={<FormDigitizerPage />} />
+            <Route path="/admin/institution/:institutionId" element={<InstitutionIntelligencePage />} />
             <Route path="/setup" element={<SetupPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Routes>

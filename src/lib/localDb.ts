@@ -248,6 +248,138 @@ function initializeSchema(database: Database): void {
     )
   `);
 
+  // ========================================
+  // Institution Intelligence Module Tables
+  // ========================================
+
+  // Divisions table - organizational divisions within institutions
+  database.run(`
+    CREATE TABLE IF NOT EXISTS divisions (
+      id TEXT PRIMARY KEY,
+      institution_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      name_si TEXT,
+      name_ta TEXT,
+      slug TEXT NOT NULL,
+      description TEXT,
+      icon TEXT,
+      color TEXT,
+      display_order INTEGER DEFAULT 0,
+      contact_count INTEGER DEFAULT 0,
+      form_count INTEGER DEFAULT 0,
+      address TEXT,
+      phones TEXT DEFAULT '[]',
+      fax TEXT,
+      email TEXT,
+      location_type TEXT,
+      district TEXT,
+      is_active INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Migration: Add new columns to divisions table if they don't exist
+  const divisionColumnsResult = database.exec(`PRAGMA table_info(divisions)`);
+  if (divisionColumnsResult.length > 0) {
+    const existingDivisionColumns = divisionColumnsResult[0].values.map(row => row[1] as string);
+
+    if (!existingDivisionColumns.includes('address')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN address TEXT`);
+    }
+    if (!existingDivisionColumns.includes('phones')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN phones TEXT DEFAULT '[]'`);
+    }
+    if (!existingDivisionColumns.includes('fax')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN fax TEXT`);
+    }
+    if (!existingDivisionColumns.includes('email')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN email TEXT`);
+    }
+    if (!existingDivisionColumns.includes('location_type')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN location_type TEXT`);
+    }
+    if (!existingDivisionColumns.includes('district')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN district TEXT`);
+    }
+  }
+
+  // Contacts table - individual contacts within divisions
+  database.run(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id TEXT PRIMARY KEY,
+      division_id TEXT NOT NULL,
+      institution_id TEXT NOT NULL,
+      name TEXT,
+      position TEXT NOT NULL,
+      position_si TEXT,
+      position_ta TEXT,
+      phones TEXT DEFAULT '[]',
+      email TEXT,
+      fax TEXT,
+      is_head INTEGER DEFAULT 0,
+      hierarchy_level INTEGER DEFAULT 5,
+      reports_to_id TEXT,
+      display_order INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (division_id) REFERENCES divisions(id) ON DELETE CASCADE,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE CASCADE,
+      FOREIGN KEY (reports_to_id) REFERENCES contacts(id) ON DELETE SET NULL
+    )
+  `);
+
+  // Institution sync logs - track website scraping history
+  database.run(`
+    CREATE TABLE IF NOT EXISTS institution_sync_logs (
+      id TEXT PRIMARY KEY,
+      institution_id TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      content_hash TEXT,
+      status TEXT DEFAULT 'pending',
+      contacts_found INTEGER DEFAULT 0,
+      contacts_imported INTEGER DEFAULT 0,
+      divisions_created INTEGER DEFAULT 0,
+      changes_detected INTEGER DEFAULT 0,
+      changes_summary TEXT,
+      tokens_used INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      error_message TEXT,
+      synced_at TEXT NOT NULL,
+      synced_by TEXT,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE CASCADE
+    )
+  `);
+
+  // API usage tracking - monitor Claude API costs
+  database.run(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id TEXT PRIMARY KEY,
+      service TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      institution_id TEXT,
+      tokens_used INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      month_key TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE SET NULL
+    )
+  `);
+
+  // API budget settings
+  database.run(`
+    CREATE TABLE IF NOT EXISTS api_budget_settings (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      monthly_limit_usd REAL DEFAULT 5.0,
+      alert_threshold_percent INTEGER DEFAULT 80,
+      pause_on_exhausted INTEGER DEFAULT 1,
+      alert_email TEXT,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
   // Create indexes for better performance
   database.run(`CREATE INDEX IF NOT EXISTS idx_forms_status ON forms(status)`);
   database.run(`CREATE INDEX IF NOT EXISTS idx_forms_category ON forms(category_id)`);
@@ -259,6 +391,181 @@ function initializeSchema(database: Database): void {
   database.run(`CREATE INDEX IF NOT EXISTS idx_drafts_user ON drafts(user_id)`);
   database.run(`CREATE INDEX IF NOT EXISTS idx_drafts_form ON drafts(form_id)`);
   database.run(`CREATE INDEX IF NOT EXISTS idx_analytics_date ON analytics_events(date_key)`);
+
+  // Institution Intelligence indexes
+  database.run(`CREATE INDEX IF NOT EXISTS idx_divisions_institution ON divisions(institution_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_divisions_slug ON divisions(slug)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_contacts_division ON contacts(division_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_contacts_institution ON contacts(institution_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_contacts_reports_to ON contacts(reports_to_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_sync_logs_institution ON institution_sync_logs(institution_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_api_usage_month ON api_usage(month_key)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_api_usage_institution ON api_usage(institution_id)`);
+}
+
+// Run migrations for existing databases
+function runMigrations(database: Database): void {
+  // Check if institutions table needs sync columns
+  const institutionColumns = database.exec("PRAGMA table_info(institutions)");
+  if (institutionColumns.length > 0) {
+    const columnNames = institutionColumns[0].values.map(row => row[1] as string);
+
+    // Add sync tracking columns if they don't exist
+    if (!columnNames.includes('source_url')) {
+      database.run(`ALTER TABLE institutions ADD COLUMN source_url TEXT`);
+    }
+    if (!columnNames.includes('content_hash')) {
+      database.run(`ALTER TABLE institutions ADD COLUMN content_hash TEXT`);
+    }
+    if (!columnNames.includes('last_synced_at')) {
+      database.run(`ALTER TABLE institutions ADD COLUMN last_synced_at TEXT`);
+    }
+    if (!columnNames.includes('auto_sync_enabled')) {
+      database.run(`ALTER TABLE institutions ADD COLUMN auto_sync_enabled INTEGER DEFAULT 0`);
+    }
+    if (!columnNames.includes('sync_frequency')) {
+      database.run(`ALTER TABLE institutions ADD COLUMN sync_frequency TEXT DEFAULT 'weekly'`);
+    }
+  }
+
+  // Create new tables if they don't exist (for existing DBs)
+  // Divisions table
+  database.run(`
+    CREATE TABLE IF NOT EXISTS divisions (
+      id TEXT PRIMARY KEY,
+      institution_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      name_si TEXT,
+      name_ta TEXT,
+      slug TEXT NOT NULL,
+      description TEXT,
+      icon TEXT,
+      color TEXT,
+      display_order INTEGER DEFAULT 0,
+      contact_count INTEGER DEFAULT 0,
+      form_count INTEGER DEFAULT 0,
+      address TEXT,
+      phones TEXT DEFAULT '[]',
+      fax TEXT,
+      email TEXT,
+      location_type TEXT,
+      district TEXT,
+      is_active INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Migration: Add new columns to existing divisions table
+  const divisionColumnsResult = database.exec(`PRAGMA table_info(divisions)`);
+  if (divisionColumnsResult.length > 0) {
+    const existingDivisionColumns = divisionColumnsResult[0].values.map(row => row[1] as string);
+
+    if (!existingDivisionColumns.includes('address')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN address TEXT`);
+    }
+    if (!existingDivisionColumns.includes('phones')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN phones TEXT DEFAULT '[]'`);
+    }
+    if (!existingDivisionColumns.includes('fax')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN fax TEXT`);
+    }
+    if (!existingDivisionColumns.includes('email')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN email TEXT`);
+    }
+    if (!existingDivisionColumns.includes('location_type')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN location_type TEXT`);
+    }
+    if (!existingDivisionColumns.includes('district')) {
+      database.run(`ALTER TABLE divisions ADD COLUMN district TEXT`);
+    }
+  }
+
+  // Contacts table
+  database.run(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id TEXT PRIMARY KEY,
+      division_id TEXT NOT NULL,
+      institution_id TEXT NOT NULL,
+      name TEXT,
+      position TEXT NOT NULL,
+      position_si TEXT,
+      position_ta TEXT,
+      phones TEXT DEFAULT '[]',
+      email TEXT,
+      fax TEXT,
+      is_head INTEGER DEFAULT 0,
+      hierarchy_level INTEGER DEFAULT 5,
+      reports_to_id TEXT,
+      display_order INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (division_id) REFERENCES divisions(id) ON DELETE CASCADE,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE CASCADE,
+      FOREIGN KEY (reports_to_id) REFERENCES contacts(id) ON DELETE SET NULL
+    )
+  `);
+
+  // Institution sync logs
+  database.run(`
+    CREATE TABLE IF NOT EXISTS institution_sync_logs (
+      id TEXT PRIMARY KEY,
+      institution_id TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      content_hash TEXT,
+      status TEXT DEFAULT 'pending',
+      contacts_found INTEGER DEFAULT 0,
+      contacts_imported INTEGER DEFAULT 0,
+      divisions_created INTEGER DEFAULT 0,
+      changes_detected INTEGER DEFAULT 0,
+      changes_summary TEXT,
+      tokens_used INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      error_message TEXT,
+      synced_at TEXT NOT NULL,
+      synced_by TEXT,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE CASCADE
+    )
+  `);
+
+  // API usage tracking
+  database.run(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id TEXT PRIMARY KEY,
+      service TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      institution_id TEXT,
+      tokens_used INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      month_key TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (institution_id) REFERENCES institutions(id) ON DELETE SET NULL
+    )
+  `);
+
+  // API budget settings
+  database.run(`
+    CREATE TABLE IF NOT EXISTS api_budget_settings (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      monthly_limit_usd REAL DEFAULT 5.0,
+      alert_threshold_percent INTEGER DEFAULT 80,
+      pause_on_exhausted INTEGER DEFAULT 1,
+      alert_email TEXT,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  // Create indexes if they don't exist
+  database.run(`CREATE INDEX IF NOT EXISTS idx_divisions_institution ON divisions(institution_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_divisions_slug ON divisions(slug)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_contacts_division ON contacts(division_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_contacts_institution ON contacts(institution_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_contacts_reports_to ON contacts(reports_to_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_sync_logs_institution ON institution_sync_logs(institution_id)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_api_usage_month ON api_usage(month_key)`);
+  database.run(`CREATE INDEX IF NOT EXISTS idx_api_usage_institution ON api_usage(institution_id)`);
 }
 
 // Initialize database
@@ -278,10 +585,15 @@ export async function initDatabase(): Promise<Database> {
 
     if (savedData) {
       db = new SQL.Database(savedData);
+      // Run migrations for existing database
+      runMigrations(db);
     } else {
       db = new SQL.Database();
       initializeSchema(db);
     }
+
+    // Save after initialization/migration
+    await saveToIndexedDB(db.export());
 
     return db;
   })();
